@@ -27,6 +27,9 @@ def schedule_user(user: User):
 def start():
     with SessionLocal() as s:
         for u in s.query(User).all():
-            schedule_user(u)
+            try:
+                schedule_user(u)
+            except ValueError:  # 坏的存量配置只跳过该用户，不阻止整个服务启动
+                log.error("invalid send_time %r for user=%s; job skipped", u.send_time, u.id)
     if not scheduler.running:
         scheduler.start()

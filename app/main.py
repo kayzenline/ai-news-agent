@@ -1,5 +1,6 @@
 """FastAPI + Jinja2 前端：身份、订阅偏好、历史简报、Agent trace、立即运行。"""
 import json
+import re
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -77,10 +78,12 @@ def user_page(request: Request, uid: int):
 @app.post("/users/{uid}/prefs")
 def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords: str = Form(""),
                language: str = Form("zh"), send_time: str = Form("08:00"), email_enabled: str = Form(None)):
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", send_time or ""):
+        raise HTTPException(422, "send_time must be HH:MM (00:00-23:59)")
     with SessionLocal() as s:
         u = s.get(User, uid) or _404()
         u.name, u.topics, u.keywords, u.language = name, _split(topics), _split(keywords), language
-        u.send_time, u.email_enabled = send_time[:5], 1 if email_enabled else 0
+        u.send_time, u.email_enabled = send_time, 1 if email_enabled else 0
         s.commit()
         scheduler.schedule_user(u)
     return RedirectResponse(f"/users/{uid}?msg=saved", status_code=303)

@@ -94,3 +94,18 @@ def test_same_day_runs_keep_their_own_body(tmp_path, monkeypatch):
     assert Path(b2.path).read_text() == "Replacement brief"
     dedup = Path(b1.path).parents[2] / "briefs" / "2026-10-11.md"
     assert dedup.read_text() == "Replacement brief"
+
+
+def test_invalid_send_time_rejected_and_startup_survives(tmp_path, monkeypatch):
+    """review fix #5: 25:00 must be rejected before commit; a bad stored value must not crash startup."""
+    from app import config, db, main, scheduler
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    with TestClient(main.app) as c:
+        c.post("/users", data={"name": "A", "email": "a@x.com"})
+        r = c.post("/users/1/prefs", data={"name": "A", "send_time": "25:00"})
+        assert r.status_code == 422
+        with db.SessionLocal() as s:
+            assert s.get(db.User, 1).send_time != "25:00"
+            s.get(db.User, 1).send_time = "99:99"  # 模拟历史坏数据
+            s.commit()
+    scheduler.start()  # 不应抛异常
