@@ -65,3 +65,27 @@ def test_registry_feeds_errors_back(sb):
     assert not ok and "invalid JSON" in out
     ok, out = reg.call("read_file", '{"wrong": 1}')
     assert not ok and "bad arguments" in out
+
+
+# --- review fix #1: options could smuggle output paths / write actions ---
+@pytest.mark.parametrize("cmd", [
+    "sort -o../outside.txt input.txt", "sort -o ../outside.txt input.txt",
+    "uniq input.txt ../outside.txt", "grep -f../outside.txt x input.txt",
+    "grep --file=../outside.txt input.txt", "find . -fprint ../outside.txt",
+    "find . -delete", "find . -exec cat {} +", "ls --color=always", "cat -Z input.txt",
+    "head -n../x input.txt", "date -s 2020-01-01", "date -f input.txt",
+    "find ../ -name x", "find . -newer ../outside.txt",
+])
+def test_bash_option_smuggling_blocked(sb, cmd):
+    (sb.root / "input.txt").write_text("b\na\n")
+    with pytest.raises(SandboxError):
+        T.bash(sb, cmd)
+    assert not (sb.root.parent / "outside.txt").exists()
+
+
+@pytest.mark.parametrize("cmd", ["head -n 1 input.txt", "head -5 input.txt", "grep -in a input.txt",
+                                 "grep -e b input.txt", "find . -name '*.txt' -type f", "wc -l input.txt",
+                                 "date +%F", "ls -la briefs", "tail -n1 input.txt", "mkdir -p notes/x"])
+def test_bash_safe_options_allowed(sb, cmd):
+    (sb.root / "input.txt").write_text("b\na\n")
+    assert T.bash(sb, cmd).startswith("[exit 0]")

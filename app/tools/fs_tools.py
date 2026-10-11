@@ -58,10 +58,116 @@ def write_file(sb: Sandbox, path: str, content: str) -> str:
     return f"wrote {len(content)} chars to {sb.rel(f)}"
 
 
-# bash：白名单命令 + 禁止元字符 + 不走 shell + cwd 固定在工作区 + 超时
-ALLOWED_CMDS = {"ls", "cat", "head", "tail", "wc", "grep", "find", "date", "echo", "sort", "uniq", "mkdir"}
+# bash：白名单命令 + 每个命令的选项白名单 + 禁止元字符 + 不走 shell + cwd 固定在工作区 + 超时
+# 只保留只读命令（外加工作区内 mkdir）；sort/uniq 有写文件能力（sort -o、uniq IN OUT），已移除。
+# spec: flags=允许的无参短选项字母; value=带参短选项 -> 参数类型("num"/"text");
+#       operands="path"(全部按路径做沙箱检查) / "text"(不是路径) / "date"(只能是 +FORMAT)
+BASH_SPECS = {
+    "ls":    {"flags": "lahR1trSFd", "value": {}, "operands": "path"},
+    "cat":   {"flags": "nbsAE", "value": {}, "operands": "path"},
+    "head":  {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
+    "tail":  {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
+    "wc":    {"flags": "lwcm", "value": {}, "operands": "path"},
+    "grep":  {"flags": "inrRvcHhlLwxFEoqs", "value": {"e": "text", "m": "num", "A": "num", "B": "num", "C": "num"},
+              "operands": "grep"},
+    "find":  {"operands": "find"},
+    "date":  {"flags": "uR", "value": {}, "operands": "date"},
+    "echo":  {"flags": "neE", "value": {}, "operands": "text"},
+    "mkdir": {"flags": "pv", "value": {}, "operands": "path"},
+}
+ALLOWED_CMDS = set(BASH_SPECS)
+FIND_TESTS = {"-name": "text", "-iname": "text", "-path": "text", "-ipath": "text", "-type": "text",
+              "-maxdepth": "num", "-mindepth": "num", "-mtime": "text", "-mmin": "text", "-size": "text",
+              "-newer": "path"}
+FIND_FLAGS = {"-print", "-empty", "-not", "!", "-o", "-a", "-or", "-and", "(", ")"}
 FORBIDDEN_TOKENS = [";", "&&", "||", "|", "`", "$(", ">", "<", "\n"]
 BASH_TIMEOUT = 10
+
+
+def _check_path(sb: Sandbox, a: str):
+    if a.startswith("~"):
+        raise SandboxError("~ not allowed")
+    if a.startswith("/"):
+        raise SandboxError(f"absolute paths not allowed in bash: {a}")
+    if "/" in a or a.startswith(".."):
+        sb.resolve(a)
+
+
+def _check_value(sb: Sandbox, kind: str, v: str, opt: str):
+    if kind == "num" and not v.lstrip("+-").isdigit():
+        raise SandboxError(f"option {opt} expects a number, got {v!r}")
+    if kind == "path":
+        _check_path(sb, v)
+
+
+def _validate_find(sb: Sandbox, args: list[str]):
+    i, seen_expr = 0, False
+    while i < len(args):
+        a = args[i]
+        if a in FIND_TESTS:
+            if i + 1 >= len(args):
+                raise SandboxError(f"find {a} needs a value")
+            _check_value(sb, FIND_TESTS[a], args[i + 1], a)
+            i, seen_expr = i + 2, True
+            continue
+        if a in FIND_FLAGS:
+            i, seen_expr = i + 1, True
+            continue
+        if a.startswith("-"):
+            raise SandboxError(f"find option not allowed: {a}; allowed: {sorted(FIND_TESTS) + sorted(FIND_FLAGS)}")
+        if seen_expr:
+            raise SandboxError(f"unexpected find argument: {a}")
+        _check_path(sb, a)  # 起始目录
+        i += 1
+
+
+def _validate(sb: Sandbox, argv: list[str]):
+    cmd, args = argv[0], argv[1:]
+    spec = BASH_SPECS[cmd]
+    if spec["operands"] == "find":
+        return _validate_find(sb, args)
+    operands, i, end_opts = [], 0, False
+    need_pattern = spec["operands"] == "grep"
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if end_opts or not a.startswith("-") or a == "-":
+            operands.append(a)
+            continue
+        if a == "--":
+            end_opts = True
+            continue
+        if a.startswith("--"):
+            raise SandboxError(f"long options are not allowed in bash: {a.split('=')[0]}")
+        if cmd in ("head", "tail") and a[1:].isdigit():  # head -5
+            continue
+        j = 1
+        while j < len(a):
+            ch = a[j]
+            if ch in spec["value"]:
+                v = a[j + 1:]
+                if not v:
+                    if i >= len(args):
+                        raise SandboxError(f"option -{ch} needs a value")
+                    v, i = args[i], i + 1
+                _check_value(sb, spec["value"][ch], v, f"-{ch}")
+                if cmd == "grep" and ch == "e":
+                    need_pattern = False
+                break
+            if ch not in spec["flags"]:
+                raise SandboxError(f"option -{ch} not allowed for {cmd}; allowed flags: {spec['flags']} "
+                                   f"value options: {sorted(spec['value'])}")
+            j += 1
+    kind = spec["operands"]
+    if kind == "grep":
+        if need_pattern and operands:
+            operands = operands[1:]  # 第一个操作数是 PATTERN
+        kind = "path"
+    for a in operands:
+        if kind == "path":
+            _check_path(sb, a)
+        elif kind == "date" and not a.startswith("+"):
+            raise SandboxError("date only accepts +FORMAT")
 
 
 def bash(sb: Sandbox, command: str) -> str:
@@ -73,18 +179,7 @@ def bash(sb: Sandbox, command: str) -> str:
         raise ValueError("empty command")
     if argv[0] not in ALLOWED_CMDS:
         raise SandboxError(f"command not allowed: {argv[0]}; allowed: {sorted(ALLOWED_CMDS)}")
-    if argv[0] == "find" and any(a in ("-exec", "-execdir", "-delete", "-ok") for a in argv):
-        raise SandboxError("find actions are disabled")
-    # 所有看起来像路径的参数都必须在沙箱内
-    for a in argv[1:]:
-        if a.startswith("-"):
-            continue
-        if a.startswith("~"):
-            raise SandboxError("~ not allowed")
-        if "/" in a or a.startswith(".."):
-            if a.startswith("/"):
-                raise SandboxError(f"absolute paths not allowed in bash: {a}")
-            sb.resolve(a)
+    _validate(sb, argv)
     try:
         r = subprocess.run(argv, cwd=sb.root, capture_output=True, text=True,
                            timeout=BASH_TIMEOUT, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
