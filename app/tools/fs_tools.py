@@ -36,6 +36,9 @@ def search_content(sb: Sandbox, keyword: str, dir: str = ".") -> str:
     kw = keyword.lower()
     hits = []
     for f in sorted(d.rglob("*")):
+        real = f.resolve()
+        if real != sb.root and sb.root not in real.parents:
+            continue  # 遍历到指向工作区外的软链：跳过
         if not f.is_file() or f.stat().st_size > 2_000_000:
             continue
         try:
@@ -68,7 +71,7 @@ BASH_SPECS = {
     "head":  {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
     "tail":  {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
     "wc":    {"flags": "lwcm", "value": {}, "operands": "path"},
-    "grep":  {"flags": "inrRvcHhlLwxFEoqs", "value": {"e": "text", "m": "num", "A": "num", "B": "num", "C": "num"},
+    "grep":  {"flags": "inrvcHhlLwxFEoqs", "value": {"e": "text", "m": "num", "A": "num", "B": "num", "C": "num"},
               "operands": "grep"},
     "find":  {"operands": "find"},
     "date":  {"flags": "uR", "value": {}, "operands": "date"},
@@ -89,8 +92,7 @@ def _check_path(sb: Sandbox, a: str):
         raise SandboxError("~ not allowed")
     if a.startswith("/"):
         raise SandboxError(f"absolute paths not allowed in bash: {a}")
-    if "/" in a or a.startswith(".."):
-        sb.resolve(a)
+    sb.resolve(a)  # 每个操作数都解析（含 basename 软链），确保真实目标在工作区内
 
 
 def _check_value(sb: Sandbox, kind: str, v: str, opt: str):

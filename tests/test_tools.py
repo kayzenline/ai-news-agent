@@ -89,3 +89,15 @@ def test_bash_option_smuggling_blocked(sb, cmd):
 def test_bash_safe_options_allowed(sb, cmd):
     (sb.root / "input.txt").write_text("b\na\n")
     assert T.bash(sb, cmd).startswith("[exit 0]")
+
+
+# --- review fix #6: basename symlinks / traversed symlinks escaping the workspace ---
+def test_symlink_basename_and_search_blocked(sb):
+    secret = sb.root.parent / "secret.txt"
+    secret.write_text("TOPSECRET\n")
+    (sb.root / "link.txt").symlink_to(secret)
+    with pytest.raises(SandboxError):
+        T.bash(sb, "cat link.txt")
+    assert "TOPSECRET" not in T.search_content(sb, "TOPSECRET", ".")
+    with pytest.raises(SandboxError):
+        T.bash(sb, "grep -R TOPSECRET .")
