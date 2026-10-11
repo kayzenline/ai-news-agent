@@ -1,6 +1,7 @@
 """新闻工具：web_search 聚合免费来源（HN Algolia / arXiv / RSS，可选 Tavily），fetch_url 抓正文。"""
 import html
 import re
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 
 import feedparser
@@ -18,6 +19,20 @@ UA = {"User-Agent": "ai-news-agent/0.1 (+https://github.com/kayzenline)"}
 TIMEOUT = 15
 
 
+def _entry_dt(e) -> datetime | None:
+    t = e.get("published_parsed") or e.get("updated_parsed")
+    return datetime(*t[:6], tzinfo=timezone.utc) if t else None
+
+
+def _recent(dt: datetime | None, days: int) -> bool:
+    """回溯窗口过滤：发布日期早于 now-days 的丢弃；日期未知的保留，并在结果里标 date=unknown 交给模型判断。"""
+    return dt is None or dt >= datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _fmt(dt: datetime | None, width: int = 10) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M")[:width] if dt else "unknown"
+
+
 def _hn(query: str, days: int) -> list[dict]:
     since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
     r = httpx.get("https://hn.algolia.com/api/v1/search_by_date",
@@ -28,17 +43,18 @@ def _hn(query: str, days: int) -> list[dict]:
              "date": h.get("created_at", "")[:10], "points": h.get("points")} for h in r.json().get("hits", []) if h.get("title")]
 
 
-def _arxiv(query: str) -> list[dict]:
+def _arxiv(query: str, days: int) -> list[dict]:
     r = httpx.get("http://export.arxiv.org/api/query",
                   params={"search_query": f"all:{query}", "sortBy": "submittedDate", "sortOrder": "descending", "max_results": 5},
                   timeout=TIMEOUT, headers=UA)
     r.raise_for_status()
     feed = feedparser.parse(r.text)
-    return [{"source": "arxiv", "title": " ".join(e.title.split()), "url": e.link, "date": e.get("published", "")[:10],
-             "summary": " ".join(e.get("summary", "").split())[:300]} for e in feed.entries]
+    return [{"source": "arxiv", "title": " ".join(e.title.split()), "url": e.link, "date": _fmt(_entry_dt(e)),
+             "summary": " ".join(e.get("summary", "").split())[:300]}
+            for e in feed.entries if _recent(_entry_dt(e), days)]
 
 
-def _rss(query: str) -> list[dict]:
+def _rss(query: str, days: int) -> list[dict]:
     words = [w.lower() for w in query.split() if len(w) > 1]
     out = []
     for name, url in RSS_FEEDS.items():
@@ -49,23 +65,32 @@ def _rss(query: str) -> list[dict]:
             continue
         for e in feed.entries[:30]:
             text = (e.get("title", "") + " " + e.get("summary", "")).lower()
-            if not words or any(w in text for w in words):
+            if (not words or any(w in text for w in words)) and _recent(_entry_dt(e), days):
                 out.append({"source": name, "title": e.get("title"), "url": e.get("link"),
-                            "date": (e.get("published") or "")[:16]})
+                            "date": _fmt(_entry_dt(e), 16)})
     return out[:10]
 
 
-def _tavily(query: str) -> list[dict]:
+def _tavily(query: str, days: int) -> list[dict]:
     r = httpx.post("https://api.tavily.com/search", timeout=TIMEOUT,
-                   json={"api_key": config.TAVILY_API_KEY, "query": query, "topic": "news", "days": 2, "max_results": 8})
+                   json={"api_key": config.TAVILY_API_KEY, "query": query, "topic": "news", "days": days, "max_results": 8})
     r.raise_for_status()
-    return [{"source": "tavily", "title": x["title"], "url": x["url"], "summary": x.get("content", "")[:300]}
-            for x in r.json().get("results", [])]
+    out = []
+    for x in r.json().get("results", []):
+        try:
+            dt = parsedate_to_datetime(x["published_date"]) if x.get("published_date") else None
+        except (TypeError, ValueError):
+            dt = None
+        if _recent(dt, days):
+            out.append({"source": "tavily", "title": x["title"], "url": x["url"], "date": _fmt(dt),
+                        "summary": x.get("content", "")[:300]})
+    return out
 
 
 def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> str:
     sources = sources or (["tavily"] if config.TAVILY_API_KEY else ["hackernews", "rss", "arxiv"])
-    fns = {"hackernews": lambda: _hn(query, days), "arxiv": lambda: _arxiv(query), "rss": lambda: _rss(query), "tavily": lambda: _tavily(query)}
+    fns = {"hackernews": lambda: _hn(query, days), "arxiv": lambda: _arxiv(query, days), "rss": lambda: _rss(query, days),
+           "tavily": lambda: _tavily(query, days)}
     results, errors = [], []
     for s in sources:
         if s not in fns:

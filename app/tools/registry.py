@@ -22,7 +22,7 @@ TOOL_SCHEMAS = [
         {"command": S}, ["command"]),
     _fn("web_search", "Search recent AI news. Sources: hackernews, rss (TechCrunch/VentureBeat/MIT TR/HF blog), arxiv, tavily (if configured). Returns title|url|date lines.",
         {"query": S, "sources": {"type": "array", "items": {"type": "string", "enum": ["hackernews", "rss", "arxiv", "tavily"]}},
-         "days": {"type": "integer", "description": "look-back window in days, default 2"}}, ["query"]),
+         "days": {"type": "integer", "description": "look-back window in days (applies to all sources), default 2; items with unknown publish date are kept and marked date=unknown"}}, ["query"]),
     _fn("fetch_url", "Fetch a web page and return its plain text (truncated) to read details of a story.", {"url": S}, ["url"]),
 ]
 

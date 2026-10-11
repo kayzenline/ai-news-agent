@@ -101,3 +101,50 @@ def test_symlink_basename_and_search_blocked(sb):
     assert "TOPSECRET" not in T.search_content(sb, "TOPSECRET", ".")
     with pytest.raises(SandboxError):
         T.bash(sb, "grep -R TOPSECRET .")
+
+
+# --- review fix #8: days window must apply to every source ---
+RSS_XML = """<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>
+<item><title>AI old story</title><link>https://old.example/a</link><pubDate>Mon, 01 Jan 2001 00:00:00 GMT</pubDate></item>
+<item><title>AI fresh story</title><link>https://new.example/a</link><pubDate>{now}</pubDate></item>
+<item><title>AI undated story</title><link>https://nodate.example/a</link></item>
+</channel></rss>"""
+ATOM_XML = """<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>arxiv</title>
+<entry><title>AI old paper</title><id>x</id><link href="https://arxiv.org/abs/old"/><published>2001-01-01T00:00:00Z</published><summary>s</summary></entry>
+<entry><title>AI new paper</title><id>y</id><link href="https://arxiv.org/abs/new"/><published>{iso}</published><summary>s</summary></entry>
+</feed>"""
+
+
+def test_days_window_applies_to_rss_arxiv_tavily(monkeypatch):
+    from datetime import datetime, timezone
+    from email.utils import format_datetime
+    from app.tools import news_tools as N
+    now = datetime.now(timezone.utc)
+    sent = {}
+
+    class R:
+        def __init__(self, text, js=None):
+            self.text, self.content, self._js = text, text.encode(), js
+        def raise_for_status(self): pass
+        def json(self): return self._js
+
+    def fake_get(url, **k):
+        if "arxiv" in url:
+            return R(ATOM_XML.format(iso=now.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        return R(RSS_XML.format(now=format_datetime(now)))
+
+    def fake_post(url, json=None, **k):
+        sent.update(json)
+        return R("", {"results": [
+            {"title": "AI old", "url": "https://old.t/a", "published_date": "Mon, 01 Jan 2001 00:00:00 GMT"},
+            {"title": "AI new", "url": "https://new.t/a", "published_date": format_datetime(now)}]})
+
+    monkeypatch.setattr(N.httpx, "get", fake_get)
+    monkeypatch.setattr(N.httpx, "post", fake_post)
+    monkeypatch.setattr(N, "RSS_FEEDS", {"feed": "https://feed.example/rss"})
+    rss = N.web_search("AI", sources=["rss"], days=1)
+    assert "old.example" not in rss and "new.example" in rss and "nodate.example/a | unknown" in rss
+    arx = N.web_search("AI", sources=["arxiv"], days=1)
+    assert "abs/old" not in arx and "abs/new" in arx
+    tav = N.web_search("AI", sources=["tavily"], days=5)
+    assert sent["days"] == 5 and "old.t" not in tav and "new.t" in tav
