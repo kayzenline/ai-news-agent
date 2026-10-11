@@ -18,10 +18,14 @@ def _load_dotenv(path: str = ".env") -> None:
 _load_dotenv()
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+# LLM_PROVIDER: grok | claude | openai | fake
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")          # 通用 OpenAI 兼容（OpenAI/DeepSeek/Kimi）
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-LLM_FAKE = os.getenv("LLM_FAKE", "0") == "1" or not LLM_API_KEY
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "15"))
 TOOL_OUTPUT_LIMIT = 6000  # 单次工具输出截断，控制 token
