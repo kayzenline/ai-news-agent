@@ -75,8 +75,8 @@ sequenceDiagram
 - `bash` 的多层防护：
   1. 拒绝 `; && || | \` $( > <` 和换行，所以没法拼接命令、重定向或做命令替换；
   2. `shlex.split` 之后用 `subprocess.run(argv)` 执行，**不走 shell**；
-  3. 白名单只有 `ls cat head tail wc grep find date echo sort uniq mkdir`，`find` 不能用 `-exec/-delete`；
-  4. 路径参数要过沙箱检查，不允许绝对路径和 `~`；
+  3. 命令白名单只有 `ls cat head tail wc grep find date echo mkdir`（`sort`/`uniq` 能写文件，已移除），并且**每个命令有自己的选项白名单**：未知选项、长选项（`--file=`、`--output=`）一律拒绝；`find` 只允许 `-name/-type/-maxdepth` 等测试项，`-exec/-delete/-fprint` 等动作全拒；带值选项的值（如 `-n` 必须是数字）也要校验；
+  4. **每个**文件操作数（包括 basename，如 `cat link.txt`）都 `resolve()` 过沙箱检查，所以软链也拦得住；不允许绝对路径和 `~`；`grep -R`（会跟随软链）不在白名单里；`search_content` 遍历时逐个检查文件真实路径，跳过指向工作区外的软链；
   5. cwd 固定在工作区，环境变量只留 PATH，超时 10 秒。
   - 已知局限：这是应用层沙箱，不是 OS 级隔离。生产环境应该再套一层容器、nsjail 或 seccomp，用只读挂载、断网的 bash 执行器。
 - 新闻工具：`web_search` 把多个来源聚合成一行一条的紧凑文本，单个来源失败时把错误附在结果后面；`fetch_url` 只允许 http(s)，会去掉 script/style 标签，结果截断。（局限：还没做 SSRF 防护，比如拦截内网 IP，见 §14。）
@@ -84,7 +84,7 @@ sequenceDiagram
 
 ## 5. Prompt 设计
 
-system prompt 只交代三件事：**目标**（写出 `briefs/{today}.md` 后停下）、**环境**（工作区布局）、**建议**（先读画像、查重、格式、遇到 ERROR 换办法、控制调用次数）。不规定工具调用的顺序。日期由代码注入，避免模型自己猜。语言和话题来自 `profile.json`，模型必须通过工具去读，这样“读偏好”本身也是模型的一次决策，trace 里能看到。
+system prompt 只交代三件事：**目标**（写出本次运行的输出文件 `runs/{today}/<run_id>.md` 后停下）、**环境**（工作区布局）、**建议**（先读画像、查重、格式、遇到 ERROR 换办法、控制调用次数）。不规定工具调用的顺序。日期由代码注入，避免模型自己猜。语言和话题来自 `profile.json`，模型必须通过工具去读，这样“读偏好”本身也是模型的一次决策，trace 里能看到。
 
 ## 6. 停止条件
 
@@ -104,11 +104,11 @@ APScheduler `BackgroundScheduler`，每个用户一个 job（`id=user_<id>`）�
 
 ## 9. 存储
 
-SQLite + SQLAlchemy 2.0，两张表：`users`（身份、偏好、推送时间）和 `briefs`（索引、状态、步数、token、trace JSON）。简报正文以 Markdown 文件存放在工作区里。这样 Agent 能用文件工具直接读历史，数据库只做索引和展示用。启动时 `create_all`，`schema.sql` 是等价的 DDL。
+SQLite + SQLAlchemy 2.0，两张表：`users`（身份、偏好、推送时间）和 `briefs`（索引、状态、步数、token、trace JSON）。简报正文以 Markdown 文件存放在工作区里：每次运行写自己独立的 `runs/YYYY-MM-DD/<run_id>.md`（不可变，`Brief.path` 指向它，历史正文和 trace 一一对应）；只有本次运行确实成功调用 `write_file` 写了该文件、内容非空且是本次运行开始后写的，才标记 `ok`、发邮件，并复制到 `briefs/YYYY-MM-DD.md` 供后续去重。这样 Agent 能用文件工具直接读历史，数据库只做索引和展示用。启动时 `create_all`，`schema.sql` 是等价的 DDL。
 
 ## 10. 前端
 
-服务端渲染（FastAPI + Jinja2），不需要构建步骤。简报页把 trace 逐步展开显示：每一步模型想调用什么、工具返回了什么、耗时多少。面试演示时可以直接用这个页面说明“顺序是模型决定的”。
+服务端渲染（FastAPI + Jinja2），不需要构建步骤。简报 Markdown（来自模型、新闻源、用户昵称，都不可信）转 HTML 之后用 `nh3` 按严格白名单清理（只留基本排版标签，`a` 只留 `href/title`，URL 只允许 http/https/mailto），再交给 `|safe`。推送时间在写库前校验 `HH:MM`，非法返回 422；调度启动时跳过坏的存量配置并记日志，不会让整个服务起不来。简报页把 trace 逐步展开显示：每一步模型想调用什么、工具返回了什么、耗时多少。面试演示时可以直接用这个页面说明“顺序是模型决定的”。
 
 ## 11. 错误处理汇总
 
@@ -142,6 +142,10 @@ SQLite + SQLAlchemy 2.0，两张表：`users`（身份、偏好、推送时间�
 ## 15. 局限
 
 应用层沙箱，不是 OS 级隔离；`fetch_url` 还没做 SSRF 内网拦截；去重只匹配字面；RSS 抓取是串行的，比较慢；没有登录鉴权（身份只靠邮箱识别）；调度只支持单进程；没做 prompt 注入防护（网页内容可能夹带指令，不过工具权限本来就很小）。
+
+### Review fixes（2026-10-11）
+
+代码审查发现 8 个问题（2 个 P1、6 个 P2），已全部修复并各自配了回归测试，详见 [REVIEW.md](REVIEW.md)：bash 选项白名单、简报 HTML 清理、每次运行独立输出、推送时间校验、软链检查、假模型去掉全局缓存、`days` 窗口对所有新闻源生效（发布日期未知的条目保留并标 `date=unknown`）。仍然存在的局限：bash 仍是应用层沙箱（检查与执行之间换软链的 TOCTOU 需要 OS 级隔离才能根治）。
 
 ## 16. 后续工作
 
