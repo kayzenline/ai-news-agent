@@ -10,3 +10,4 @@ markdown>=3.5
 pytest>=8.0
 openai>=1.30
 anthropic>=0.40
+nh3>=0.2

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import markdown
+import nh3
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -16,6 +17,16 @@ from .service import run_for_user
 
 logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# 简报 Markdown 来自模型/新闻源/用户昵称，均不可信：转 HTML 后用严格白名单清理再 |safe 渲染
+SAFE_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr", "ul", "ol", "li", "strong", "em", "b", "i",
+             "code", "pre", "blockquote", "a", "table", "thead", "tbody", "tr", "th", "td"}
+
+
+def render_markdown(md: str) -> str:
+    html = markdown.markdown(md)
+    return nh3.clean(html, tags=SAFE_TAGS, attributes={"a": {"href", "title"}},
+                     url_schemes={"http", "https", "mailto"}, link_rel="noopener noreferrer nofollow")
 
 
 @asynccontextmanager
@@ -92,7 +103,7 @@ def brief_page(request: Request, bid: int):
         b = s.get(Brief, bid) or _404()
     p = Path(b.path)
     md = p.read_text(encoding="utf-8") if p.exists() else "_（简报文件不存在，见 trace）_"
-    return templates.TemplateResponse(request, "brief.html", {"b": b, "html": markdown.markdown(md),
+    return templates.TemplateResponse(request, "brief.html", {"b": b, "html": render_markdown(md),
                                       "trace": json.loads(b.trace_json or "[]")})
 
 
