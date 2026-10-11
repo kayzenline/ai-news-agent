@@ -17,6 +17,8 @@ def demo_script(messages):
     tool_msgs = [m for m in messages if m["role"] == "tool"]
     done = [c["name"] for m in messages if m["role"] == "assistant" for c in m.get("tool_calls") or []]
     today = re.search(r"Today is (\d{4}-\d{2}-\d{2})", messages[0]["content"]).group(1)
+    m = re.search(r"write today's brief to (\S+)", messages[0]["content"])
+    out = m.group(1) if m else f"briefs/{today}.md"
     if "read_file" not in done:
         return _call("read_file", path="profile.json")
     if "list_dir" not in done:
@@ -39,5 +41,5 @@ def demo_script(messages):
             items = items[1:]  # 第一条在历史简报里出现过 -> 去重
         body = "\n".join(f"- **{l.split(' | ')[0][4:].split('] ',1)[-1]}** — {l.split(' | ')[1]}" for l in items[:8]) or "- 今日未检索到新内容（来源不可用或已全部去重）"
         md = f"# {profile.get('name','')} 的 AI 新闻简报 · {today}\n\n## {' / '.join(topics)}\n\n{body}\n"
-        return _call("write_file", path=f"briefs/{today}.md", content=md)
-    return LLMResponse(f"已生成 briefs/{today}.md", [], "end")
+        return _call("write_file", path=out, content=md)
+    return LLMResponse(f"已生成 {out}", [], "end")

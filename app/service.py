@@ -1,7 +1,10 @@
 """业务层：同步用户画像到工作区文件 -> 跑 Agent -> 记录简报索引与 trace -> 可选邮件推送。"""
 import json
 import smtplib
+import shutil
 import threading
+import time
+import uuid
 from datetime import date
 from email.mime.text import MIMEText
 
@@ -38,9 +41,16 @@ def run_for_user(user_id: int, llm=None, today: str | None = None) -> Brief:
             sb = sync_profile(user)
             today = today or date.today().isoformat()
             agent = Agent(llm or get_provider(), ToolRegistry(sb))
-            res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today)
-            path = sb.root / "briefs" / f"{today}.md"
-            ok = path.exists() and res.stopped_reason == "model_finished"
+            # 每次运行独立、不可变的输出文件；成功后才同步到 briefs/{today}.md 供去重
+            run_id = f"{time.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
+            rel = f"runs/{today}/{run_id}.md"
+            path = sb.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            started = time.time()
+            res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today, output=rel)
+            ok = res.stopped_reason == "model_finished" and _wrote_this_run(res.trace, rel, path, started)
+            if ok:
+                shutil.copyfile(path, sb.root / "briefs" / f"{today}.md")
             b = Brief(user_id=user.id, date=today, path=str(path), status="ok" if ok else "failed",
                       stopped_reason=res.stopped_reason, steps=res.steps, tokens_in=res.usage["input"],
                       tokens_out=res.usage["output"], trace_json=dump_trace(res.trace))
@@ -55,6 +65,15 @@ def run_for_user(user_id: int, llm=None, today: str | None = None) -> Brief:
             return b
     finally:
         lock.release()
+
+
+def _wrote_this_run(trace, rel: str, path, started: float) -> bool:
+    """本次运行必须成功调用 write_file 写入自己的输出文件，且文件非空、在本次开始后修改。"""
+    wrote = any(t.get("type") == "tool" and t.get("name") == "write_file" and t.get("ok")
+                and json.loads(t.get("arguments") or "{}").get("path", "").lstrip("/").lstrip("./") == rel
+                for t in trace)
+    return (wrote and path.is_file() and path.stat().st_mtime >= started - 1
+            and path.read_text(encoding="utf-8").strip() != "")
 
 
 def send_email(to: str, subject: str, body: str):

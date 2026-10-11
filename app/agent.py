@@ -10,7 +10,7 @@ from .tools.registry import ToolRegistry
 
 SYSTEM_PROMPT = """You are a daily AI-news briefing agent working inside a user's private workspace.
 Workspace layout: profile.json (user name, topics, keywords, language), briefs/ (previous briefs, YYYY-MM-DD.md).
-Goal: write today's brief to briefs/{today}.md, then reply with a one-line summary and STOP calling tools.
+Goal: write today's brief to {output} (this run's output file; do not write it into briefs/, the system archives it there after success), then reply with a one-line summary and STOP calling tools.
 Guidelines (you decide the order and number of tool calls):
 - Read profile.json first to learn the user's topics/keywords/language.
 - Use web_search with focused queries derived from the topics; fetch_url only for the few stories you need details on.
@@ -34,9 +34,11 @@ class Agent:
         self.llm, self.tools = llm, tools
         self.max_steps = max_steps or config.MAX_STEPS
 
-    def run(self, task: str, today: str | None = None) -> AgentResult:
+    def run(self, task: str, today: str | None = None, output: str | None = None) -> AgentResult:
         today = today or date.today().isoformat()
-        messages = [{"role": "system", "content": SYSTEM_PROMPT.replace("{today}", today)},
+        output = output or f"briefs/{today}.md"
+        prompt = SYSTEM_PROMPT.replace("{today}", today).replace("{output}", output)
+        messages = [{"role": "system", "content": prompt},
                     {"role": "user", "content": task}]
         res = AgentResult(final_text="")
         seen_calls: dict[str, int] = {}
