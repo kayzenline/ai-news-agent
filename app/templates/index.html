@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block body %}
+<div class="card"><h3>填写身份 / 登录</h3>
+<form method="post" action="/users"><label>昵称 <input name="name" required></label>
+<label>邮箱 <input name="email" type="email" required></label><button>进入</button></form></div>
+<h3>已有用户</h3><ul>{% for u in users %}<li><a href="/users/{{u.id}}">{{u.name}}</a> ({{u.email}})</li>{% else %}<li>暂无</li>{% endfor %}</ul>
+<p>LLM provider: <code>{{provider}}</code></p>{% endblock %}

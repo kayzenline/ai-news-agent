@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% block body %}
+{% if msg == "started" %}<p>✅ 已开始生成，稍后刷新查看。</p>{% elif msg == "saved" %}<p>✅ 已保存。</p>{% endif %}
+<div class="card"><h3>订阅偏好 · {{u.email}}</h3>
+<form method="post" action="/users/{{u.id}}/prefs">
+<label>昵称 <input name="name" value="{{u.name}}"></label>
+<label>话题（逗号分隔）<input name="topics" size="60" value="{{u.topics|join(', ')}}"></label>
+<label>关键词（逗号分隔）<input name="keywords" size="60" value="{{u.keywords|join(', ')}}"></label>
+<label>语言 <select name="language"><option value="zh" {% if u.language=='zh' %}selected{% endif %}>中文</option>
+<option value="en" {% if u.language=='en' %}selected{% endif %}>English</option></select></label>
+<label>每日推送时间 <input name="send_time" type="time" value="{{u.send_time}}"></label>
+<label><input type="checkbox" name="email_enabled" {% if u.email_enabled %}checked{% endif %}> 邮件推送（需配置 SMTP）</label>
+<button>保存</button></form>
+<p>下次定时运行：{{next_run or "未调度"}}</p>
+<form method="post" action="/users/{{u.id}}/run"><button>▶ 立即生成今日简报</button></form></div>
+<h3>历史简报</h3><table><tr><th>日期</th><th>状态</th><th>步数</th><th>tokens</th><th></th></tr>
+{% for b in briefs %}<tr><td>{{b.date}}</td><td class="{{b.status}}">{{b.status}} ({{b.stopped_reason}})</td><td>{{b.steps}}</td>
+<td>{{b.tokens_in}}/{{b.tokens_out}}</td><td><a href="/briefs/{{b.id}}">查看 + trace</a></td></tr>
+{% else %}<tr><td colspan="5">暂无</td></tr>{% endfor %}</table>{% endblock %}

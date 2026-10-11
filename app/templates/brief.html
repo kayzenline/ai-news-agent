@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block body %}
+<p><a href="/users/{{b.user_id}}">← 返回</a> · {{b.date}} · <span class="{{b.status}}">{{b.status}}</span> · {{b.stopped_reason}} · {{b.steps}} 步</p>
+<div class="card">{{html|safe}}</div>
+<h3>Agent Trace（模型自主决定的工具调用）</h3>
+{% for t in trace %}<div class="card"><b>step {{t.step}} · {{t.type}}{% if t.name %} · {{t.name}}{% endif %}</b> {% if t.ms is defined %}({{t.ms}} ms){% endif %}
+{% if t.type == "llm" %}{% if t.text %}<pre>{{t.text}}</pre>{% endif %}{% for c in t.tool_calls %}<div>→ <code>{{c.name}}({{c.arguments}})</code></div>{% endfor %}
+{% elif t.type == "tool" %}<div><code>{{t.arguments}}</code> {{ "✅" if t.ok else "❌" }}</div><pre>{{t.output}}</pre>
+{% else %}<pre>{{t.error}}</pre>{% endif %}</div>{% endfor %}{% endblock %}
