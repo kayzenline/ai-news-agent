@@ -94,3 +94,26 @@ def test_openai_message_conversion():
     msgs = OpenAICompatProvider.to_api_messages(HIST)
     assert msgs[2]["tool_calls"][0]["function"]["name"] == "list_dir"
     assert msgs[3] == {"role": "tool", "tool_call_id": "a", "content": "[F] x"}
+
+
+def test_demo_script_no_cross_user_cache():
+    """review fix #7: interleave A's search, B's search, A's dedup; A must keep its own results."""
+    from app.llm.demo import demo_script
+    def hist(name, topic, url):
+        sysm = {"role": "system", "content": "Today is 2026-10-11. write today's brief to runs/x.md (..."}
+        calls = [("read_file", '{"name":"%s","topics":["%s"]}' % (name, topic)), ("list_dir", "[F] a"),
+                 ("web_search", f"- [hn] {topic} story | {url} | ")]
+        msgs = [sysm, {"role": "user", "content": "go"}]
+        for i, (n, out) in enumerate(calls):
+            msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": str(i), "name": n, "arguments": "{}"}]})
+            msgs.append({"role": "tool", "tool_call_id": str(i), "content": out})
+        return msgs
+    a, b = hist("Alice", "Robotics", "https://a.com/1"), hist("Bob", "LLM", "https://b.com/1")
+    ra = demo_script(a)  # A -> search_content
+    demo_script(b)       # B searches in between
+    a += [{"role": "assistant", "content": "", "tool_calls": [{"id": "9", "name": "search_content", "arguments": "{}"}]},
+          {"role": "tool", "tool_call_id": "9", "content": "no matches"}]
+    w = demo_script(a)
+    content = json.loads(w.tool_calls[0].arguments)["content"]
+    assert ra.tool_calls[0].name == "search_content"
+    assert "a.com/1" in content and "b.com" not in content

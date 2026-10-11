@@ -30,13 +30,13 @@ def demo_script(messages):
         return _call("web_search", query=q, sources=["hackernews"], days=2)
     results = [l for l in tool_msgs[-1]["content"].splitlines() if l.startswith("- [")] if done[-1] == "web_search" else None
     if results is not None:
-        global _cache
-        _cache = results
         if results:
             url = results[0].split(" | ")[1]
             return _call("search_content", keyword=url, dir="briefs")
     if "write_file" not in done:
-        items = _cache if "_cache" in globals() else []
+        # 从本次运行自己的消息历史取搜索结果（无模块级共享状态，多用户并发互不串扰）
+        ws = tool_msgs[done.index("web_search")]["content"] if "web_search" in done else ""
+        items = [l for l in ws.splitlines() if l.startswith("- [")]
         if tool_msgs[-1]["content"] != "no matches" and items:
             items = items[1:]  # 第一条在历史简报里出现过 -> 去重
         body = "\n".join(f"- **{l.split(' | ')[0][4:].split('] ',1)[-1]}** — {l.split(' | ')[1]}" for l in items[:8]) or "- 今日未检索到新内容（来源不可用或已全部去重）"
