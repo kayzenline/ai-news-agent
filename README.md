@@ -2,19 +2,21 @@
 
 跨赴科技 Agent 开发实习生笔试 · 选项 A。Python 实现，Agent 循环手写：调用哪个工具、调几次、什么时候停，都由 LLM 自己决定，代码里没有写死的线性流程。按用户的订阅偏好（话题、关键词）每天整理 AI 新闻简报，保存到历史记录，邮件推送可选。
 
-详细设计报告见 [docs/DESIGN.md](docs/DESIGN.md)。
+详细设计报告见 [docs/DESIGN.md](docs/DESIGN.md)，2026-10-12 设计评审见 [docs/DESIGN_REVIEW.md](docs/DESIGN_REVIEW.md)。
 
 ## 5 分钟快速开始
 
 ```bash
 git clone <repo> && cd ai-news-agent
 cp .env.example .env            # 填一个 provider 的 key（见下表）；不填 key 也可以用 fake 模式演示
-./run.sh                        # 自动建 venv、装依赖、启动 http://localhost:8000
+./run.sh                        # 自动建 venv、装依赖、启动 http://127.0.0.1:8000（HOST 可改，默认只监听本机）
 ```
 
-不想配 key：`LLM_PROVIDER=fake ./run.sh` 启动离线“假模型”，它也会按顺序调用真实工具（读画像 → 列历史 → 搜 HN → 去重 → 写简报），可以走完整个流程。
+不想配 key：`LLM_PROVIDER=fake ./run.sh` 用脚本化“假模型”代替真实 LLM（读画像 → 列历史 → 搜 HN → 去重 → 写简报）。注意它**只免模型 API，不是全离线**：`web_search` 仍会真实请求 Hacker News；测试里替换了搜索工具才做到离线。脚本顺序是写死的，不能用来证明模型自主性。“5 分钟启动”尚未在干净环境复验，依赖也未锁版本。
 
-打开 http://localhost:8000 → 填昵称和邮箱 → 设置话题、关键词、每日时间 → 点「立即生成今日简报」→ 刷新页面，查看简报和 Agent trace。
+打开 http://127.0.0.1:8000 → 填昵称和邮箱 → 设置话题、关键词、时区、每日开始生成时间 → 点「立即生成今日简报」→ 在「最近运行」看状态（也可轮询 `GET /runs/<run_id>`）→ 查看简报、投递状态和 Agent trace。
+
+> 没有登录鉴权：邮箱只是身份标识，不是认证。不要把服务开放到局域网或公网（见 DESIGN §12）。
 
 | LLM_PROVIDER | 需要的环境变量 | 说明 |
 |---|---|---|
@@ -23,23 +25,24 @@ cp .env.example .env            # 填一个 provider 的 key（见下表）；�
 | `openai` | `LLM_API_KEY`，`LLM_BASE_URL`，`LLM_MODEL` | 任意 OpenAI 兼容接口：OpenAI / DeepSeek / Kimi |
 | `fake` | 无 | 离线演示 / 测试 |
 
-其他：`make test` 跑测试，`TAVILY_API_KEY` 可选（配了就用 Tavily 搜索），`SMTP_*` 是邮件推送（默认关闭），建表 SQL 在 `schema.sql`（启动时也会自动建表）。
+其他：`make test` 跑测试；`TAVILY_API_KEY` 可选；`SMTP_*` 是邮件推送（默认关闭；用户开了邮件但服务没配 SMTP 时，投递状态显示 `not_configured`）；`DEFAULT_TIMEZONE`、`CATCHUP_HOURS`、`MAX_CONCURRENT_RUNS`、`AGENT_MAX_TOOL_CALLS`、`AGENT_RUN_DEADLINE_S` 见 `.env.example`。建表 SQL 在 `schema.sql`；启动时 `create_all` 建缺失表并给旧库补缺失的可空列，这不是完整迁移。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-  UI[FastAPI + Jinja2 页面] -->|立即运行| SVC[service.run_for_user]
-  SCH[APScheduler 每用户 cron] --> SVC
-  SVC -->|同步 profile.json| WS[(用户工作区<br/>profile.json / briefs/*.md)]
+  UI[FastAPI + Jinja2 页面] -->|立即运行| SUB[service.submit_run<br/>先写 runs 表，有界执行池]
+  SCH[APScheduler 每用户 cron（用户时区）+ 补跑扫描] --> SUB
+  SUB --> SVC[service.run_for_user]
+  SVC -->|同步 profile.json| WS[(用户工作区<br/>profile.json / staging/ / runs/ / briefs/)]
   SVC --> AG[Agent 循环]
   AG <-->|统一消息格式| AD[Provider 适配层<br/>Grok / Claude / OpenAI兼容 / Fake]
   AG -->|tool calls| REG[ToolRegistry]
   REG --> FS[list_dir / read_file / search_content / write_file / bash<br/>沙箱限定在工作区]
   REG --> NEWS[web_search: HN·arXiv·RSS·Tavily<br/>fetch_url]
   FS --> WS
-  SVC --> DB[(SQLite: users / briefs + trace)]
-  SVC -.可选.-> MAIL[SMTP 邮件]
+  SVC --> DB[(SQLite: users / runs / briefs + trace / deliveries)]
+  DB -.deliveries.-> MAIL[SMTP 邮件（独立投递，可重发）]
 ```
 
 ## 目录
@@ -56,12 +59,17 @@ tests/                沙箱逃逸、Agent 循环（假 LLM）、适配层转换
 
 ## 设计决策（摘要，详见 [DESIGN.md](docs/DESIGN.md)）
 
-- **输出与渲染**：每次运行写独立的 `runs/<日期>/<run_id>.md`，确认本次真的写了才算成功并同步到 `briefs/` 去重；简报 HTML 用 `nh3` 白名单清理防 XSS；`web_search` 的 `days` 对所有来源生效。
+- **输出、发布与历史**：模型只能写本轮 `staging/<run_id>/brief.md`（画像、`runs/`、`briefs/` 对模型只读）。校验通过后由 Service 原子改名发布到 `runs/<日期>/<run_id>.md`，并**追加**一份到 `briefs/<日期>/<run_id>.md` 作去重历史，从不覆盖旧记录（同日 A → B → A 也查得到 A）。简报 HTML 用 `nh3` 白名单清理防 XSS。
+- **内容契约（第一版）**：每份 0–10 条，不凑数；每个链接必须出现在本轮 `web_search`/`fetch_url` 的结果里，否则把错误回传给模型修订（最多 2 次），仍不过记 `validation_failed`。0 条记 `no_news`，不发邮件。程序只能证明“链接来自工具结果”，不能证明摘要事实正确。
+- **运行与状态**：手动和定时都走 `submit_run`，先写 `runs` 表再执行；同用户已有任务返回同一个 run；全局并发和排队有上限；任何异常都落到 run 终态，重启时遗留任务标 `interrupted`。
+- **时区与补跑**：每用户 IANA 时区，业务日期按用户时区算；定时任务同日只有一个逻辑 run（幂等键），停机错过的在 `CATCHUP_HOURS` 窗口内补一次，DST 跳过的时刻顺延到当天首个有效时刻。
+- **投递**：`deliveries` 表独立记录 `not_configured/pending/sending/sent/failed/unknown`，失败可重发原正文，不重跑模型；不承诺 exactly-once。
+- **网络安全**：`fetch_url` 拒绝内网/保留地址、凭据 URL 和非 80/443 端口，重定向逐跳重验，响应最多读 2 MB。仍有 DNS rebinding 窗口，开放服务前需出口网络规则。
 - **代码审查记录**：8 个问题的发现与修复见 [docs/REVIEW.md](docs/REVIEW.md)。
 
 - **为什么手写循环、不用 LangGraph**：核心逻辑约 80 行，每一步都看得见、测得了；多 provider 的差异收在适配层里，不依赖框架的抽象。题目要求的“模型自己决策”就是一个 while 循环加工具分发。
-- **模型怎么决定停**：某一轮模型不再返回 tool call，就算完成。另有三道保护：`AGENT_MAX_STEPS` 步数上限（倒数第二步会提示“马上收尾”），同一个调用重复 3 次就拒绝执行，LLM 报错时干净退出。
-- **bash 安全**：命令白名单（只读类命令）+ 每个命令的选项白名单（拒绝 `sort -o`、`find -exec`、长选项等），禁止管道、重定向、`;`、`$()`；不经过 shell 直接执行，cwd 固定在工作区，每个文件操作数（含 basename 软链）都要过沙箱检查，有 10 秒超时，环境变量清空。文件工具都用 `resolve()` 检查路径，防住 `..` 和符号链接逃逸。
-- **去重**：模型用 `search_content` 拿 URL 或标题去 `briefs/` 里查，命中了就丢掉。简单、可解释，也不需要向量库。
+- **模型怎么决定停**：某一轮模型不再返回 tool call，就算完成（再过内容校验）。保护：`AGENT_MAX_STEPS` 轮数上限（倒数第二轮提示收尾）、`AGENT_MAX_TOOL_CALLS` 总工具调用上限、`AGENT_RUN_DEADLINE_S` 软期限（只在每轮/每次调用前检查，不能中断进行中的同步调用）、参数规范化后同一调用第 3 次拒绝执行、LLM 报错时干净退出。循环没有固定业务步骤，但 Prompt 给了策略建议（如先读画像）。
+- **bash 安全**：命令白名单（只读类命令）+ 每个命令的选项白名单（拒绝 `sort -o`、`find -exec`、长选项等），禁止管道、重定向、`;`、`$()`；不经过 shell 直接执行，cwd 固定在工作区，每个文件操作数（含 basename 软链）都要过沙箱检查，有 10 秒超时，环境变量只保留 `PATH`/`LANG`。`mkdir` 只能在本轮 staging 下。这是应用层限制，不是 OS 级隔离。文件工具都用 `resolve()` 检查路径，防住 `..` 和符号链接逃逸。
+- **去重**：模型用 `search_content` 拿 URL 或标题去 `briefs/`（完整的追加式历史）里查，命中了就丢掉。只做字面匹配；同一事件换 URL 的识别（事件更新雷达）是下一阶段。
 - **成本控制**：工具输出截断到 6000 字符、`read_file` 最多 2 万字符，搜索结果只返回标题、链接、日期这几行，prompt 里建议 4 到 10 次调用，每次运行记录 token 用量。
-- **失败处理**：工具异常转成 `ERROR: ...` 回传给模型，让它自己纠正；单个新闻来源失败不影响其他来源；推送失败不影响简报落盘；每个用户同一时间只跑一个任务。
+- **失败处理**：工具异常转成 `ERROR: ...` 回传给模型，让它自己纠正；单个新闻来源（包括单个 RSS feed）失败会写进结果的 `errors:` 行；推送失败只影响投递状态；每个用户同一时间只跑一个任务。
