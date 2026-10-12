@@ -1,4 +1,5 @@
 """五个基础工具：list_dir / read_file / search_content / write_file / bash。"""
+import glob
 import shlex
 import subprocess
 
@@ -175,6 +176,43 @@ def _validate(sb: Sandbox, argv: list[str]):
             raise SandboxError("date only accepts +FORMAT")
 
 
+GLOB_CMDS = {"ls", "cat", "head", "tail", "wc", "grep"}
+GLOB_CHARS = set("*?[")
+MAX_GLOB_MATCHES = 200
+
+
+def expand_globs(sb: Sandbox, argv: list[str]) -> list[str]:
+    """不经 shell，所以自己做通配符展开：只展开文件操作数，只在工作区内匹配，结果按字典序。
+    grep 的 PATTERN、选项值、find/echo 的参数不展开。"""
+    cmd = argv[0]
+    if cmd not in GLOB_CMDS:
+        return argv
+    out, need_pattern = [cmd], cmd == "grep" and not any(a == "-e" or (a.startswith("-e") and len(a) > 2) for a in argv[1:])
+    value_opts = set(BASH_SPECS[cmd]["value"])
+    skip_next = end_opts = False
+    for a in argv[1:]:
+        if skip_next:
+            out.append(a); skip_next = False; continue
+        if not end_opts and a == "--":
+            end_opts = True; out.append(a); continue
+        if not end_opts and a.startswith("-") and a != "-":
+            if a[-1] in value_opts and len(a) == 2:
+                skip_next = True
+            out.append(a); continue
+        if need_pattern:
+            need_pattern = False; out.append(a); continue
+        if not GLOB_CHARS & set(a):
+            out.append(a); continue
+        _check_path(sb, a.split("*")[0].split("?")[0].split("[")[0] or ".")  # 拒绝绝对路径、~、..逃逸的前缀
+        matches = sorted(glob.glob(a, root_dir=sb.root))
+        if not matches:
+            raise SandboxError(f"no files match {a!r}")
+        if len(matches) > MAX_GLOB_MATCHES:
+            raise SandboxError(f"{a!r} matches {len(matches)} files (max {MAX_GLOB_MATCHES}); narrow the pattern")
+        out.extend(matches)
+    return out
+
+
 def bash(sb: Sandbox, command: str) -> str:
     for t in FORBIDDEN_TOKENS:
         if t in command:
@@ -184,7 +222,8 @@ def bash(sb: Sandbox, command: str) -> str:
         raise ValueError("empty command")
     if argv[0] not in ALLOWED_CMDS:
         raise SandboxError(f"command not allowed: {argv[0]}; allowed: {sorted(ALLOWED_CMDS)}")
-    _validate(sb, argv)
+    argv = expand_globs(sb, argv)
+    _validate(sb, argv)  # 展开后的每个路径仍逐个做沙箱检查
     try:
         r = subprocess.run(argv, cwd=sb.root, capture_output=True, text=True,
                            timeout=BASH_TIMEOUT, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})

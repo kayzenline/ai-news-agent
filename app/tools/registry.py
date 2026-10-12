@@ -18,7 +18,7 @@ TOOL_SCHEMAS = [
     _fn("search_content", "Case-insensitive keyword search across files under dir. Use it to check whether a story/url already appeared in previous briefs.",
         {"keyword": S, "dir": S}, ["keyword", "dir"]),
     _fn("write_file", "Create or overwrite a text file in the user workspace.", {"path": S, "content": S}, ["path", "content"]),
-    _fn("bash", "Run ONE restricted read-only shell command inside the workspace (allowed: ls cat head tail wc grep find date echo mkdir, each with a small option allowlist; no pipes/redirects/long options). 10s timeout.",
+    _fn("bash", "Run ONE restricted read-only shell command inside the workspace (allowed: ls cat head tail wc grep find date echo mkdir, each with a small option allowlist; no pipes/redirects/long options). Globs (* ? [...]) in file operands of ls/cat/head/tail/wc/grep are expanded inside the workspace, e.g. `ls briefs/2026-10-12/*.md`. 10s timeout.",
         {"command": S}, ["command"]),
     _fn("web_search", "Search recent AI news. Sources: hackernews, rss (TechCrunch/VentureBeat/MIT TR/HF blog), arxiv, tavily (if configured). Returns one line per result: `- ev_NNN [source] title | url | date`; cite results by their evidence id.",
         {"query": S, "sources": {"type": "array", "items": {"type": "string", "enum": ["hackernews", "rss", "arxiv", "tavily"]}},

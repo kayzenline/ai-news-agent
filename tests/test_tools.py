@@ -295,3 +295,30 @@ def test_tavily_401_is_concise(monkeypatch):
         401, text='{"detail":"secret-ish body"}', request=httpx.Request("POST", url)))
     out = N.web_search("x", sources=["tavily"])
     assert out.endswith("errors: tavily: HTTP 401 (check TAVILY_API_KEY)") and "secret-ish" not in out
+
+
+def test_bash_glob_expands_inside_workspace(tmp_path):
+    from app.tools.fs_tools import bash
+    from app.tools.sandbox import Sandbox, SandboxError
+    sb = Sandbox(tmp_path)
+    d = tmp_path / "briefs" / "2026-10-12"; d.mkdir(parents=True)
+    (d / "a.md").write_text("alpha\n"); (d / "b.md").write_text("beta\n"); (d / "c.txt").write_text("x")
+    out = bash(sb, "ls briefs/2026-10-12/*.md")
+    assert "a.md" in out and "b.md" in out and "c.txt" not in out and out.startswith("[exit 0]")
+    assert "beta" in bash(sb, "grep -n beta briefs/*/*.md")
+    assert "alpha" in bash(sb, "cat briefs/2026-10-12/?.md")
+    assert "a.md" in bash(sb, "grep -l al* briefs/2026-10-12/a.md")  # grep PATTERN 不展开
+    with pytest.raises(SandboxError, match="no files match"):
+        bash(sb, "ls briefs/*.json")
+    for bad in ["cat ../*", "cat /etc/*", "cat ~/*"]:
+        with pytest.raises(SandboxError):
+            bash(sb, bad)
+
+
+def test_bash_glob_cannot_follow_symlink_out(tmp_path):
+    from app.tools.fs_tools import bash
+    from app.tools.sandbox import Sandbox, SandboxError
+    outside = tmp_path / "outside"; outside.mkdir(); (outside / "s.md").write_text("secret")
+    ws = tmp_path / "ws"; ws.mkdir(); (ws / "link").symlink_to(outside)
+    with pytest.raises(SandboxError):
+        bash(Sandbox(ws), "cat link/*.md")
