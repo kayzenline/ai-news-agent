@@ -20,16 +20,17 @@ TOOL_SCHEMAS = [
     _fn("write_file", "Create or overwrite a text file in the user workspace.", {"path": S, "content": S}, ["path", "content"]),
     _fn("bash", "Run ONE restricted read-only shell command inside the workspace (allowed: ls cat head tail wc grep find date echo mkdir, each with a small option allowlist; no pipes/redirects/long options). 10s timeout.",
         {"command": S}, ["command"]),
-    _fn("web_search", "Search recent AI news. Sources: hackernews, rss (TechCrunch/VentureBeat/MIT TR/HF blog), arxiv, tavily (if configured). Returns title|url|date lines.",
+    _fn("web_search", "Search recent AI news. Sources: hackernews, rss (TechCrunch/VentureBeat/MIT TR/HF blog), arxiv, tavily (if configured). Returns one line per result: `- ev_NNN [source] title | url | date`; cite results by their evidence id.",
         {"query": S, "sources": {"type": "array", "items": {"type": "string", "enum": ["hackernews", "rss", "arxiv", "tavily"]}},
          "days": {"type": "integer", "description": "look-back window in days (applies to all sources), default 2; items with unknown publish date are kept and marked date=unknown"}}, ["query"]),
-    _fn("fetch_url", "Fetch a web page and return its plain text (truncated) to read details of a story.", {"url": S}, ["url"]),
+    _fn("fetch_url", "Fetch a public web page and return its plain text (truncated), prefixed with the evidence_id assigned to this page.", {"url": S}, ["url"]),
 ]
 
 
 class ToolRegistry:
-    def __init__(self, sandbox: Sandbox, extra: dict[str, Callable] | None = None):
+    def __init__(self, sandbox: Sandbox, extra: dict[str, Callable] | None = None, evidence=None):
         self.sb = sandbox
+        self.evidence = evidence  # EvidenceStore：给 web_search/fetch_url 结果分配本轮 evidence_id
         self.impl: dict[str, Callable[..., str]] = {
             "list_dir": lambda path=".": fs_tools.list_dir(self.sb, path),
             "read_file": lambda path: fs_tools.read_file(self.sb, path),
@@ -61,6 +62,11 @@ class ToolRegistry:
             return False, f"ERROR: bad arguments for {name}: {e}"
         except Exception as e:
             return False, f"ERROR: {type(e).__name__}: {e}"
+        if self.evidence is not None:
+            if name == "web_search":
+                out = self.evidence.annotate_search(out)
+            elif name == "fetch_url":
+                out = self.evidence.annotate_fetch(str(args.get("url", "")), out)
         if len(out) > config.TOOL_OUTPUT_LIMIT:
             out = out[: config.TOOL_OUTPUT_LIMIT] + f"\n...[truncated {len(out) - config.TOOL_OUTPUT_LIMIT} chars]"
         return True, out
