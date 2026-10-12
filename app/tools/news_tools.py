@@ -47,11 +47,27 @@ def _hn(query: str, days: int) -> list[dict]:
              "date": h.get("created_at", "")[:10], "points": h.get("points")} for h in r.json().get("hits", []) if h.get("title")]
 
 
+ARXIV_API = "https://export.arxiv.org/api/query"
+
+
+def _arxiv_get(params: dict):
+    """HTTPS；手动跟随重定向，最多 3 跳，且只允许跳到 https 的 arxiv.org 域名。"""
+    url = ARXIV_API
+    for _ in range(4):
+        r = httpx.get(url, params=params, timeout=TIMEOUT, headers=UA, follow_redirects=False)
+        if not getattr(r, "is_redirect", False):
+            r.raise_for_status()
+            return r
+        url = urljoin(url, r.headers.get("location", ""))
+        host = (urlsplit(url).hostname or "").lower()
+        if urlsplit(url).scheme != "https" or not (host == "arxiv.org" or host.endswith(".arxiv.org")):
+            raise ValueError(f"arxiv redirected to an unexpected location: {url}")
+        params = None  # location 已带完整 query
+    raise ValueError("arxiv: too many redirects")
+
+
 def _arxiv(query: str, days: int) -> list[dict]:
-    r = httpx.get("http://export.arxiv.org/api/query",
-                  params={"search_query": f"all:{query}", "sortBy": "submittedDate", "sortOrder": "descending", "max_results": 5},
-                  timeout=TIMEOUT, headers=UA)
-    r.raise_for_status()
+    r = _arxiv_get({"search_query": f"all:{query}", "sortBy": "submittedDate", "sortOrder": "descending", "max_results": 5})
     feed = feedparser.parse(r.text)
     return [{"source": "arxiv", "title": " ".join(e.title.split()), "url": e.link, "date": _fmt(_entry_dt(e)),
              "summary": " ".join(e.get("summary", "").split())[:300]}

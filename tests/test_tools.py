@@ -247,3 +247,22 @@ def test_rss_no_match_is_reported_not_silent(monkeypatch):
     assert "notes: rss: no items matched" in out
     items = [l for l in out.splitlines() if l.startswith("- [")]
     assert len(items) <= 3 and all("unmatched" in l for l in items)
+
+
+def test_arxiv_uses_https_and_only_follows_arxiv_redirects(monkeypatch):
+    import httpx
+    from app.tools import news_tools as N
+    calls = []
+    def get(url, **k):
+        calls.append((url, k.get("follow_redirects")))
+        req = httpx.Request("GET", url)
+        if len(calls) == 1:
+            return httpx.Response(301, headers={"location": "https://arxiv.org/api/query?search_query=all:x"}, request=req)
+        return httpx.Response(200, text="<feed xmlns='http://www.w3.org/2005/Atom'></feed>", request=req)
+    monkeypatch.setattr(N.httpx, "get", get)
+    assert N._arxiv("x", 2) == []
+    assert calls[0] == ("https://export.arxiv.org/api/query", False) and calls[1][0].startswith("https://arxiv.org/")
+    monkeypatch.setattr(N.httpx, "get", lambda url, **k: httpx.Response(
+        302, headers={"location": "http://169.254.169.254/"}, request=httpx.Request("GET", url)))
+    with pytest.raises(ValueError, match="unexpected location"):
+        N._arxiv("x", 2)
