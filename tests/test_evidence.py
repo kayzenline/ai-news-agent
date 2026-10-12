@@ -28,3 +28,17 @@ def test_failed_tool_call_assigns_no_evidence(tmp_path):
 def test_canonical_url():
     assert canonical_url("HTTPS://Ex.COM:443/Path?utm_source=x&id=7#frag") == "https://ex.com/Path?id=7"
     assert canonical_url("http://ex.com:8080/a") == "http://ex.com:8080/a"
+
+
+def test_fetch_inherits_date_and_source_from_search():
+    from app.brief import render_markdown
+    s = EvidenceStore()
+    s.annotate_search("- [techcrunch_ai] Agents in texts | https://techcrunch.com/2026/10/10/agents/ | 2026-10-10 09:00")
+    s.annotate_fetch("https://TechCrunch.com/2026/10/10/agents#top", "body")
+    e = s.get("ev_002")
+    assert e.published_at == "2026-10-10 09:00" and e.source == "techcrunch_ai" and e.title == "Agents in texts"
+    md = render_markdown({"items": [{"title": "t", "topic": "AI", "summary": "s", "why_it_matters": "w",
+                                     "evidence_ids": ["ev_002"]}]}, s, "E", "2026-10-11")
+    assert "2026-10-10 09:00" in md and "日期未知" not in md
+    s.annotate_fetch("https://other.com/x", "body")
+    assert s.get("ev_003").published_at == "unknown"

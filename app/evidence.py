@@ -25,6 +25,11 @@ def canonical_url(url: str) -> str:
     return urlunsplit((p.scheme.lower(), host, p.path or "/", query, ""))
 
 
+def _match_key(url: str) -> str:
+    p = urlsplit(canonical_url(url))
+    return urlunsplit((p.scheme, p.netloc, p.path.rstrip("/") or "/", p.query, ""))
+
+
 @dataclass
 class Evidence:
     evidence_id: str
@@ -76,6 +81,18 @@ class EvidenceStore:
             lines.append(f"- {eid} [{m.group(1)}] " + m.group(2))
         return "\n".join(lines)
 
+    def match_search(self, url: str) -> "Evidence | None":
+        """本轮 web_search 中规范 URL 相同（忽略末尾斜杠）的证据，优先有日期的那条。"""
+        key = _match_key(url)
+        hits = [e for e in self.items.values() if e.tool == "web_search" and _match_key(e.url) == key]
+        dated = [e for e in hits if e.published_at != "unknown"]
+        return (dated or hits or [None])[0]
+
     def annotate_fetch(self, url: str, text: str) -> str:
-        eid = self.add("fetch_url", urlsplit(url).hostname or "web", "", url, "", text)
+        # 页面本身通常不带结构化日期：继承同一 URL 的搜索结果的发布日期、来源和标题
+        prior = self.match_search(url)
+        if prior:
+            eid = self.add("fetch_url", prior.source, prior.title, url, prior.published_at, text)
+        else:
+            eid = self.add("fetch_url", urlsplit(url).hostname or "web", "", url, "", text)
         return f"evidence_id: {eid} (url: {url})\n{text}"
