@@ -1,6 +1,9 @@
 """新闻工具：web_search 聚合免费来源（HN Algolia / arXiv / RSS，可选 Tavily），fetch_url 抓正文。"""
 import html
+import ipaddress
 import re
+import socket
+from urllib.parse import urljoin, urlsplit
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 
@@ -107,11 +110,56 @@ def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> s
     return "\n".join(lines) or "no results"
 
 
-def fetch_url(url: str, max_chars: int = 4000) -> str:
-    if not url.startswith(("http://", "https://")):
+MAX_FETCH_BYTES = 2_000_000
+MAX_REDIRECTS = 5
+ALLOWED_PORTS = {80, 443}
+
+
+def check_public_url(url: str) -> None:
+    """SSRF 防护：只允许 http(s)、默认端口、无凭据，且 DNS 解析出的每个地址都必须是公网地址（IPv4/IPv6）。
+    局限：检查与连接之间仍有 DNS rebinding 窗口，共享部署前需用网络出口规则补强。"""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
         raise ValueError("only http(s) urls are allowed")
-    r = httpx.get(url, timeout=TIMEOUT, headers=UA, follow_redirects=True)
-    r.raise_for_status()
+    if parts.username or parts.password:
+        raise ValueError("urls with credentials are not allowed")
+    host = parts.hostname
+    if not host:
+        raise ValueError("url has no host")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    if port not in ALLOWED_PORTS:
+        raise ValueError(f"port {port} not allowed")
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"cannot resolve {host}: {e}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global or ip.is_multicast:
+            raise ValueError(f"blocked non-public address {ip} for host {host}")
+
+
+def _get_limited(url: str) -> httpx.Response:
+    """不自动跟随重定向：每一跳都重新做公网校验；流式读取并限制响应字节数。"""
+    for _ in range(MAX_REDIRECTS + 1):
+        check_public_url(url)
+        with httpx.stream("GET", url, timeout=TIMEOUT, headers=UA, follow_redirects=False) as r:
+            if r.is_redirect:
+                url = urljoin(url, r.headers.get("location", ""))
+                continue
+            r.raise_for_status()
+            buf = bytearray()
+            for chunk in r.iter_bytes():
+                buf += chunk
+                if len(buf) > MAX_FETCH_BYTES:
+                    break  # 超过上限只保留前 MAX_FETCH_BYTES，不继续下载
+            return httpx.Response(r.status_code, headers=r.headers, content=bytes(buf[:MAX_FETCH_BYTES]),
+                                  request=r.request)
+    raise ValueError(f"too many redirects (>{MAX_REDIRECTS})")
+
+
+def fetch_url(url: str, max_chars: int = 4000) -> str:
+    r = _get_limited(url)
     text = re.sub(r"(?is)<(script|style|nav|footer|header).*?</\1>", " ", r.text)
     text = html.unescape(re.sub(r"<[^>]+>", " ", text))
     text = re.sub(r"\s+", " ", text).strip()

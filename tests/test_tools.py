@@ -148,3 +148,31 @@ def test_days_window_applies_to_rss_arxiv_tavily(monkeypatch):
     assert "abs/old" not in arx and "abs/new" in arx
     tav = N.web_search("AI", sources=["tavily"], days=5)
     assert sent["days"] == 5 and "old.t" not in tav and "new.t" in tav
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1/", "http://localhost:80/", "http://169.254.169.254/latest/meta-data",
+                                 "http://10.0.0.1/", "http://[::1]/", "http://user:pw@example.com/", "http://example.com:8080/",
+                                 "file:///etc/passwd", "http://0.0.0.0/"])
+def test_fetch_url_blocks_ssrf_targets(url):
+    from app.tools.news_tools import fetch_url
+    with pytest.raises(ValueError):
+        fetch_url(url)
+
+
+def test_fetch_url_revalidates_each_redirect_and_limits_bytes(monkeypatch):
+    import httpx
+    from app.tools import news_tools
+    monkeypatch.setattr(news_tools, "check_public_url",
+                        lambda u: (_ for _ in ()).throw(ValueError("blocked")) if "internal" in u else None)
+    def handler(req):
+        if req.url.host == "pub.example":
+            return httpx.Response(302, headers={"location": "http://internal.example/secret"})
+        return httpx.Response(200, text="secret")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(httpx, "stream", lambda m, u, **k: client.stream(m, u, follow_redirects=False))
+    with pytest.raises(ValueError, match="blocked"):
+        news_tools.fetch_url("http://pub.example/a")
+    big = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text="x" * 5_000_000)))
+    monkeypatch.setattr(httpx, "stream", lambda m, u, **k: big.stream(m, u, follow_redirects=False))
+    monkeypatch.setattr(news_tools, "MAX_FETCH_BYTES", 1000)
+    assert len(news_tools.fetch_url("http://ok.example/", max_chars=10**7)) == 1000
