@@ -153,3 +153,45 @@ def test_rss_feed_errors_are_reported(monkeypatch):
     monkeypatch.setattr(news_tools.httpx, "get", boom)
     out = news_tools.web_search("llm", sources=["rss"])
     assert "rss/techcrunch_ai" in out and "errors:" in out
+
+
+def _fetch_agent(tmp_path, script, fetch, max_steps=15):
+    sb = Sandbox(tmp_path)
+    reg = ToolRegistry(sb, extra={"fetch_url": fetch})
+    return Agent(FakeProvider(script), reg, max_steps=max_steps)
+
+
+def test_failed_url_not_refetched_with_or_without_slash(tmp_path):
+    calls = []
+    def fetch(url, **k):
+        calls.append(url)
+        raise RuntimeError("DecodingError: boom")
+    urls = ["https://TechCrunch.com/a/", "https://techcrunch.com/a", "https://techcrunch.com/a/#x", "https://techcrunch.com/a?utm_source=x"]
+    script = [tc(i, "fetch_url", url=u) for i, u in enumerate(urls)] + [LLMResponse("done", [], "end")]
+    r = _fetch_agent(tmp_path, script, fetch).run("go")
+    assert len(calls) == 1
+    outs = [t["output"] for t in r.trace if t["type"] == "tool"]
+    assert all("do NOT retry" in o for o in outs[1:])
+
+
+def test_consecutive_failing_rounds_stop_early(tmp_path):
+    def fetch(url, **k): raise RuntimeError("down")
+    seen = []
+    def model(msgs):
+        seen.append(msgs[-1])
+        return tc(len(msgs), "fetch_url", url=f"https://ex.com/{len(msgs)}")
+    r = _fetch_agent(tmp_path, model, fetch).run("go")
+    assert r.stopped_reason == "tool_failures" and r.steps == 5
+    assert any(m["role"] == "user" and "all failed" in m["content"] for m in seen)
+
+
+def test_success_resets_failure_streak(tmp_path):
+    n = {"i": 0}
+    def fetch(url, **k):
+        n["i"] += 1
+        if n["i"] % 3 == 0:
+            return "ok page"
+        raise RuntimeError("down")
+    script = [tc(i, "fetch_url", url=f"https://ex.com/{i}") for i in range(8)] + [LLMResponse("done", [], "end")]
+    r = _fetch_agent(tmp_path, script, fetch).run("go")
+    assert r.stopped_reason == "model_finished"

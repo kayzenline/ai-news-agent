@@ -64,6 +64,8 @@ class Agent:
         seen_calls: dict[str, int] = {}
         repairs = 0
         tool_calls = 0
+        fail_rounds = 0
+        failed: dict[str, str] = {}  # 本轮已失败的网络调用 -> 简短错误
         run_start = time.time()
         for step in range(1, self.max_steps + 1):
             res.steps = step
@@ -101,8 +103,9 @@ class Agent:
                 return res
             messages.append({"role": "assistant", "content": resp.text,
                              "tool_calls": [c.__dict__ for c in resp.tool_calls]})
+            round_ok = False
             for c in resp.tool_calls:
-                key = f"{c.name}:{canonical_args(c.arguments)}"
+                key = call_key(c.name, c.arguments)
                 seen_calls[key] = seen_calls.get(key, 0) + 1
                 tool_calls += 1
                 t1 = time.time()
@@ -110,18 +113,60 @@ class Agent:
                     ok, out = False, f"ERROR: tool-call budget ({self.max_tool_calls}) exhausted; write the brief with what you have and finish."
                 elif t1 - run_start > self.deadline_s:
                     ok, out = False, "ERROR: run deadline exceeded; finish now."
+                elif key in failed:
+                    # 同一目标本轮已失败过：直接返回缓存的短错误，不再请求
+                    ok, out = False, (f"ERROR: this call already failed earlier in this run ({failed[key]}); "
+                                      "do NOT retry it (with or without trailing slash); use another source or finish.")
                 elif seen_calls[key] > 2:
                     ok, out = False, "ERROR: identical call repeated 3 times; change approach or finish."
                 else:
                     ok, out = self.tools.call(c.name, c.arguments)
+                    if not ok and c.name in NETWORK_TOOLS:
+                        failed[key] = out.removeprefix("ERROR: ")[:160]
+                round_ok = round_ok or ok
                 res.trace.append({"step": step, "type": "tool", "name": c.name, "arguments": c.arguments,
                                   "ok": ok, "output": out[:2000], "ms": int((time.time() - t1) * 1000)})
                 messages.append({"role": "tool", "tool_call_id": c.id, "content": out})
+            fail_rounds = 0 if round_ok else fail_rounds + 1
+            if fail_rounds >= FAIL_ROUNDS_STOP:
+                res.trace.append({"step": step, "type": "budget",
+                                  "error": f"{fail_rounds} consecutive rounds where every tool call failed"})
+                res.stopped_reason, res.final_text = "tool_failures", "stopped: tools kept failing"
+                return res
+            if fail_rounds == FAIL_ROUNDS_WARN:
+                messages.append({"role": "user", "content": "Your last tool calls all failed. Stop retrying the same "
+                                 "targets: write the draft now with the evidence you already have (an empty items list is fine)."})
             if step == self.max_steps - 1:
                 messages.append({"role": "user", "content": "Step budget almost exhausted: write the brief now with what you have and finish."})
         res.stopped_reason = "max_steps"
         res.final_text = "stopped: max steps reached"
         return res
+
+
+NETWORK_TOOLS = {"fetch_url", "web_search"}
+FAIL_ROUNDS_WARN = 3   # 连续 3 轮工具全失败：提示模型收尾
+FAIL_ROUNDS_STOP = 5   # 连续 5 轮：提前停止，不再耗满 MAX_STEPS
+
+
+def call_key(name: str, raw: str) -> str:
+    """重复检测的键：参数规范化；fetch_url 的 URL 再按 canonical_url 规范并去掉路径末尾斜杠。"""
+    if name == "fetch_url":
+        try:
+            args = json.loads(raw or "{}")
+            if isinstance(args, dict) and isinstance(args.get("url"), str):
+                args["url"] = dedupe_url(args["url"])
+                return f"{name}:" + json.dumps(args, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        except ValueError:
+            pass
+    return f"{name}:{canonical_args(raw)}"
+
+
+def dedupe_url(url: str) -> str:
+    from .evidence import canonical_url
+    from urllib.parse import urlsplit, urlunsplit
+    p = urlsplit(canonical_url(url))
+    path = p.path.rstrip("/") or "/"
+    return urlunsplit((p.scheme, p.netloc, path, p.query, ""))
 
 
 def canonical_args(raw: str) -> str:
