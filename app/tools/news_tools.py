@@ -57,14 +57,17 @@ def _arxiv(query: str, days: int) -> list[dict]:
             for e in feed.entries if _recent(_entry_dt(e), days)]
 
 
-def _rss(query: str, days: int) -> list[dict]:
+def _rss(query: str, days: int, errors: list | None = None) -> list[dict]:
     words = [w.lower() for w in query.split() if len(w) > 1]
     out = []
     for name, url in RSS_FEEDS.items():
         try:
             r = httpx.get(url, timeout=TIMEOUT, headers=UA, follow_redirects=True)
+            r.raise_for_status()
             feed = feedparser.parse(r.content)
-        except Exception:
+        except Exception as e:  # 单个 feed 失败不再静默：记录到 errors 回传给模型
+            if errors is not None:
+                errors.append(f"rss/{name}: {type(e).__name__}: {e}")
             continue
         for e in feed.entries[:30]:
             text = (e.get("title", "") + " " + e.get("summary", "")).lower()
@@ -95,6 +98,7 @@ def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> s
     fns = {"hackernews": lambda: _hn(query, days), "arxiv": lambda: _arxiv(query, days), "rss": lambda: _rss(query, days),
            "tavily": lambda: _tavily(query, days)}
     results, errors = [], []
+    fns["rss"] = lambda: _rss(query, days, errors)
     for s in sources:
         if s not in fns:
             errors.append(f"unknown source {s}")

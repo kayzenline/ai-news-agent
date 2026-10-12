@@ -40,9 +40,12 @@ MAX_REPAIRS = 2
 
 
 class Agent:
-    def __init__(self, llm: LLMProvider, tools: ToolRegistry, max_steps: int | None = None):
+    def __init__(self, llm: LLMProvider, tools: ToolRegistry, max_steps: int | None = None,
+                 max_tool_calls: int | None = None, deadline_s: float | None = None):
         self.llm, self.tools = llm, tools
         self.max_steps = max_steps or config.MAX_STEPS
+        self.max_tool_calls = max_tool_calls or config.MAX_TOOL_CALLS
+        self.deadline_s = deadline_s or config.RUN_DEADLINE_S
 
     def run(self, task: str, today: str | None = None, output: str | None = None,
             validator=None) -> AgentResult:
@@ -55,9 +58,15 @@ class Agent:
         res = AgentResult(final_text="")
         seen_calls: dict[str, int] = {}
         repairs = 0
+        tool_calls = 0
+        run_start = time.time()
         for step in range(1, self.max_steps + 1):
             res.steps = step
             t0 = time.time()
+            if t0 - run_start > self.deadline_s:
+                res.trace.append({"step": step, "type": "budget", "error": f"run deadline {self.deadline_s:.0f}s exceeded"})
+                res.stopped_reason, res.final_text = "deadline", "stopped: run deadline exceeded"
+                return res
             try:
                 resp = self.llm.chat(messages, self.tools.schemas())
             except Exception as e:
@@ -88,10 +97,15 @@ class Agent:
             messages.append({"role": "assistant", "content": resp.text,
                              "tool_calls": [c.__dict__ for c in resp.tool_calls]})
             for c in resp.tool_calls:
-                key = f"{c.name}:{c.arguments}"
+                key = f"{c.name}:{canonical_args(c.arguments)}"
                 seen_calls[key] = seen_calls.get(key, 0) + 1
+                tool_calls += 1
                 t1 = time.time()
-                if seen_calls[key] > 2:
+                if tool_calls > self.max_tool_calls:
+                    ok, out = False, f"ERROR: tool-call budget ({self.max_tool_calls}) exhausted; write the brief with what you have and finish."
+                elif t1 - run_start > self.deadline_s:
+                    ok, out = False, "ERROR: run deadline exceeded; finish now."
+                elif seen_calls[key] > 2:
                     ok, out = False, "ERROR: identical call repeated 3 times; change approach or finish."
                 else:
                     ok, out = self.tools.call(c.name, c.arguments)
@@ -110,6 +124,14 @@ class Agent:
         res.stopped_reason = "max_steps"
         res.final_text = "stopped: max steps reached"
         return res
+
+
+def canonical_args(raw: str) -> str:
+    """参数规范化：键排序、去空白，使 {"a":1,"b":2} 与 {"b": 2, "a": 1} 视为同一调用。"""
+    try:
+        return json.dumps(json.loads(raw or "{}"), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except (ValueError, TypeError):
+        return raw or ""
 
 
 ITEM_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+.*https?://", re.M)

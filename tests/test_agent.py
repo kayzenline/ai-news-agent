@@ -124,3 +124,37 @@ def test_evidence_urls_collected_from_search(tmp_path):
     _, agent = make(tmp_path, script)
     r = agent.run("go", today="2026-10-11")
     assert r.evidence_urls == {"https://ex.com/old", "https://ex.com/new"}
+
+
+def test_equivalent_args_count_as_repeats(tmp_path):
+    seq = iter(['{"path": "."}', '{ "path":"." }', '{"path":"."}'])
+    _, agent = make(tmp_path, lambda m: LLMResponse("", [ToolCall("x", "list_dir", next(seq, '{"path":"."}'))], "tool_use"),
+                    max_steps=4)
+    r = agent.run("go")
+    outs = [t["output"] for t in r.trace if t["type"] == "tool"]
+    assert "repeated 3 times" in outs[2]
+
+
+def test_total_tool_call_budget(tmp_path):
+    many = LLMResponse("", [ToolCall(f"c{i}", "list_dir", json.dumps({"path": f"x{i}"})) for i in range(4)], "tool_use")
+    sb, agent = make(tmp_path, lambda m: many if len(m) < 12 else LLMResponse("done", [], "end"), max_steps=6)
+    agent.max_tool_calls = 5
+    r = agent.run("go")
+    outs = [t["output"] for t in r.trace if t["type"] == "tool"]
+    assert sum("budget" in o for o in outs) == len(outs) - 5
+
+
+def test_run_deadline(tmp_path):
+    _, agent = make(tmp_path, lambda m: tc(len(m), "list_dir", path=f"{len(m)}"))
+    agent.deadline_s = 1e-9
+    r = agent.run("go")
+    assert r.stopped_reason == "deadline"
+
+
+def test_rss_feed_errors_are_reported(monkeypatch):
+    import httpx
+    from app.tools import news_tools
+    def boom(*a, **k): raise httpx.ConnectError("down")
+    monkeypatch.setattr(news_tools.httpx, "get", boom)
+    out = news_tools.web_search("llm", sources=["rss"])
+    assert "rss/techcrunch_ai" in out and "errors:" in out
