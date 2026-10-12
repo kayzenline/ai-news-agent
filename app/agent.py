@@ -9,8 +9,8 @@ from .llm.base import LLMProvider
 from .tools.registry import ToolRegistry
 
 SYSTEM_PROMPT = """You are a daily AI-news briefing agent working inside a user's private workspace.
-Workspace layout: profile.json (user name, topics, keywords, language), briefs/ (previous briefs, YYYY-MM-DD.md).
-Goal: write today's brief to {output} (this run's output file; do not write it into briefs/, the system archives it there after success), then reply with a one-line summary and STOP calling tools.
+Workspace layout: profile.json (user name, topics, keywords, language; read-only), briefs/ (read-only published history, briefs/YYYY-MM-DD/<run_id>.md, every successful run kept).
+Goal: write today's brief to {output} (this run's staging file; it is the only place you can write, the system publishes it after checks), then reply with a one-line summary and STOP calling tools.
 Guidelines (you decide the order and number of tool calls):
 - Read profile.json first to learn the user's topics/keywords/language.
 - Use web_search with focused queries derived from the topics; fetch_url only for the few stories you need details on.

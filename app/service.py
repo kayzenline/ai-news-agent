@@ -1,7 +1,6 @@
 """业务层：同步用户画像到工作区文件 -> 跑 Agent -> 记录简报索引与 trace -> 可选邮件推送。"""
 import json
 import smtplib
-import shutil
 import threading
 import time
 import uuid
@@ -40,17 +39,19 @@ def run_for_user(user_id: int, llm=None, today: str | None = None) -> Brief:
             user = s.get(User, user_id)
             sb = sync_profile(user)
             today = today or date.today().isoformat()
-            agent = Agent(llm or get_provider(), ToolRegistry(sb))
-            # 每次运行独立、不可变的输出文件；成功后才同步到 briefs/{today}.md 供去重
             run_id = f"{time.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
-            rel = f"runs/{today}/{run_id}.md"
-            path = sb.root / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
+            # 模型只能写本轮 staging；画像、briefs/ 历史、runs/ 发布目录对模型只读，只有 Service 发布
+            staging = f"staging/{run_id}"
+            rel = f"{staging}/brief.md"
+            (sb.root / staging).mkdir(parents=True, exist_ok=True)
+            tools = ToolRegistry(Sandbox(sb.root, writable=[staging]))
+            agent = Agent(llm or get_provider(), tools)
             started = time.time()
             res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today, output=rel)
-            ok = res.stopped_reason == "model_finished" and _wrote_this_run(res.trace, rel, path, started)
+            ok = res.stopped_reason == "model_finished" and _wrote_this_run(res.trace, rel, sb.root / rel, started)
+            path = sb.root / "runs" / today / f"{run_id}.md"
             if ok:
-                shutil.copyfile(path, sb.root / "briefs" / f"{today}.md")
+                path = publish(sb, sb.root / rel, today, run_id)
             b = Brief(user_id=user.id, date=today, path=str(path), status="ok" if ok else "failed",
                       stopped_reason=res.stopped_reason, steps=res.steps, tokens_in=res.usage["input"],
                       tokens_out=res.usage["output"], trace_json=dump_trace(res.trace))
@@ -65,6 +66,19 @@ def run_for_user(user_id: int, llm=None, today: str | None = None) -> Brief:
             return b
     finally:
         lock.release()
+
+
+def publish(sb: Sandbox, src, today: str, run_id: str):
+    """追加式发布：runs/<date>/<run_id>.md 为正文，briefs/<date>/<run_id>.md 为去重历史；从不覆盖旧记录。"""
+    body = src.read_text(encoding="utf-8")
+    out = sb.root / "runs" / today / f"{run_id}.md"
+    hist = sb.root / "briefs" / today / f"{run_id}.md"
+    for dst in (out, hist):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(dst)  # 同一文件系统内原子改名
+    return out
 
 
 def _wrote_this_run(trace, rel: str, path, started: float) -> bool:

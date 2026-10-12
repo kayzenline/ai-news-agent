@@ -83,17 +83,46 @@ def test_stale_same_day_file_does_not_mark_run_ok(tmp_path, monkeypatch):
 
 
 def test_same_day_runs_keep_their_own_body(tmp_path, monkeypatch):
-    """review fix #4: history entries must not share a mutable file."""
+    """review fix #4 + design review P1-2: history is append-only, A -> B -> A still finds A."""
     from pathlib import Path
     from app.llm.providers import FakeProvider
+    from app.tools import fs_tools
     service, uid, _ = _setup(tmp_path, monkeypatch)
-    b1 = service.run_for_user(uid, llm=FakeProvider(_writer("First successful brief")), today="2026-10-11")
-    b2 = service.run_for_user(uid, llm=FakeProvider(_writer("Replacement brief")), today="2026-10-11")
+    b1 = service.run_for_user(uid, llm=FakeProvider(_writer("Story A https://ex.com/a")), today="2026-10-11")
+    b2 = service.run_for_user(uid, llm=FakeProvider(_writer("Story B https://ex.com/b")), today="2026-10-11")
     assert b1.path != b2.path
-    assert Path(b1.path).read_text() == "First successful brief"
-    assert Path(b2.path).read_text() == "Replacement brief"
-    dedup = Path(b1.path).parents[2] / "briefs" / "2026-10-11.md"
-    assert dedup.read_text() == "Replacement brief"
+    assert Path(b1.path).read_text() == "Story A https://ex.com/a"
+    assert Path(b2.path).read_text() == "Story B https://ex.com/b"
+    sb = service.workspace(uid)
+    assert "ex.com/a" in fs_tools.search_content(sb, "https://ex.com/a", "briefs")
+    assert "ex.com/b" in fs_tools.search_content(sb, "https://ex.com/b", "briefs")
+
+
+def test_model_cannot_rewrite_history_or_profile(tmp_path, monkeypatch):
+    """design review P1-2: the agent may only write its own staging dir."""
+    import json
+    from pathlib import Path
+    from app.llm.base import LLMResponse, ToolCall
+    from app.llm.providers import FakeProvider
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    b1 = service.run_for_user(uid, llm=FakeProvider(_writer("Story A")), today="2026-10-11")
+    hist = next((tmp_path / "workspaces" / f"user_{uid}" / "briefs").rglob("*.md"))
+    rel_old = str(Path(b1.path).relative_to(tmp_path / "workspaces" / f"user_{uid}"))
+    seen = []
+    def evil(msgs):
+        if msgs[-1]["role"] == "tool":
+            seen.append(msgs[-1]["content"])
+        if len(seen) == 4:
+            return LLMResponse("done", [], "end")
+        targets = ["profile.json", str(hist.relative_to(hist.parents[2])), rel_old]
+        if len(seen) < 3:
+            return LLMResponse("", [ToolCall(f"e{len(seen)}", "write_file",
+                               json.dumps({"path": targets[len(seen)], "content": "pwned"}))], "tool_use")
+        return LLMResponse("", [ToolCall("m", "bash", json.dumps({"command": "mkdir -p briefs/x"}))], "tool_use")
+    service.run_for_user(uid, llm=FakeProvider(evil), today="2026-10-12")
+    assert all(o.startswith("ERROR") and "read-only" in o for o in seen)
+    assert Path(b1.path).read_text() == "Story A" and hist.read_text() == "Story A"
+    assert "pwned" not in (hist.parents[2] / "profile.json").read_text()
 
 
 def test_invalid_send_time_rejected_and_startup_survives(tmp_path, monkeypatch):

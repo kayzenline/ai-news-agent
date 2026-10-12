@@ -56,6 +56,7 @@ def write_file(sb: Sandbox, path: str, content: str) -> str:
     f = sb.resolve(path)
     if f == sb.root:
         raise SandboxError("cannot write to workspace root")
+    sb.check_writable(f)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(content, encoding="utf-8")
     return f"wrote {len(content)} chars to {sb.rel(f)}"
@@ -168,6 +169,8 @@ def _validate(sb: Sandbox, argv: list[str]):
     for a in operands:
         if kind == "path":
             _check_path(sb, a)
+            if cmd == "mkdir":
+                sb.check_writable(sb.resolve(a))
         elif kind == "date" and not a.startswith("+"):
             raise SandboxError("date only accepts +FORMAT")
 
