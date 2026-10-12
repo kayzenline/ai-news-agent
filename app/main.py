@@ -2,7 +2,6 @@
 import json
 import re
 import logging
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,8 +12,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from . import config, scheduler
-from .db import Brief, SessionLocal, User, init_db
-from .service import run_for_user
+from .db import Brief, Run, SessionLocal, User, init_db
+from .service import recover_interrupted, submit_run
 
 logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -33,6 +32,7 @@ def render_markdown(md: str) -> str:
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    recover_interrupted()
     scheduler.start()
     yield
     if scheduler.scheduler.running:
@@ -70,8 +70,9 @@ def user_page(request: Request, uid: int):
     with SessionLocal() as s:
         u = s.get(User, uid) or _404()
         briefs = s.query(Brief).filter_by(user_id=uid).order_by(Brief.id.desc()).all()
+        runs = s.query(Run).filter_by(user_id=uid).order_by(Run.id.desc()).limit(10).all()
     job = scheduler.scheduler.get_job(f"user_{uid}")
-    return templates.TemplateResponse(request, "user.html", {"u": u, "briefs": briefs,
+    return templates.TemplateResponse(request, "user.html", {"u": u, "briefs": briefs, "runs": runs,
                                       "next_run": job.next_run_time if job else None, "msg": request.query_params.get("msg")})
 
 
@@ -91,13 +92,21 @@ def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords
 
 @app.post("/users/{uid}/run")
 def run_now(uid: int):
-    def _bg():
-        try:
-            run_for_user(uid)
-        except Exception:
-            logging.exception("run now failed")
-    threading.Thread(target=_bg, daemon=True).start()
-    return RedirectResponse(f"/users/{uid}?msg=started", status_code=303)
+    try:
+        run = submit_run(uid, trigger="manual")
+    except LookupError:
+        raise HTTPException(404)
+    msg = "capacity" if run.status == "failed" and run.error.startswith("capacity") else "started"
+    return RedirectResponse(f"/users/{uid}?msg={msg}&run={run.run_id}", status_code=303)
+
+
+@app.get("/runs/{run_id}")
+def run_status(run_id: str):
+    """简单轮询接口：前端/脚本可查看 run 状态与失败原因。"""
+    with SessionLocal() as s:
+        r = s.query(Run).filter_by(run_id=run_id).first() or _404()
+        return {"run_id": r.run_id, "user_id": r.user_id, "trigger": r.trigger, "status": r.status,
+                "error": r.error, "brief_id": r.brief_id}
 
 
 @app.get("/briefs/{bid}", response_class=HTMLResponse)

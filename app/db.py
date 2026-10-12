@@ -1,7 +1,7 @@
 """SQLite + SQLAlchemy：users / briefs 两张表，启动时 create_all（轻量 migration）。"""
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from . import config
@@ -36,7 +36,24 @@ class Brief(Base):
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     trace_json: Mapped[str] = mapped_column(Text, default="[]")
+    run_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class Run(Base):
+    """请求受理即入库：queued -> running -> succeeded | no_news | failed | interrupted。失败与中断也可见。"""
+    __tablename__ = "runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(40), unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    trigger: Mapped[str] = mapped_column(String(20))  # manual | scheduled
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), unique=True, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    error: Mapped[str] = mapped_column(Text, default="")
+    brief_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 _engine = None
@@ -48,5 +65,20 @@ def init_db(url: str | None = None):
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     _engine = create_engine(url or f"sqlite:///{config.DATA_DIR / 'app.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(_engine)
+    _add_missing_columns(_engine)
     SessionLocal.configure(bind=_engine)
     return _engine
+
+
+def _add_missing_columns(engine):
+    """create_all 不会给已有表加列：这里只做“补缺失的可空列”这一种最小迁移，不改类型、不删列。"""
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name not in have:
+                    ddl = col.type.compile(engine.dialect)
+                    default = col.default.arg if col.default is not None and col.default.is_scalar else None
+                    extra = f" DEFAULT {default!r}" if default is not None else ""
+                    conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}{extra}'))

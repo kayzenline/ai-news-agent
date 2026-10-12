@@ -28,6 +28,8 @@ XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "15"))
+MAX_CONCURRENT_RUNS = int(os.getenv("MAX_CONCURRENT_RUNS", "2"))  # 全局并发（手动+定时共用）
+MAX_QUEUED_RUNS = int(os.getenv("MAX_QUEUED_RUNS", "10"))          # 排队上限，满了明确拒绝
 TOOL_OUTPUT_LIMIT = 6000  # 单次工具输出截断，控制 token
 
 SMTP = {

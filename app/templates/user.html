@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block body %}
-{% if msg == "started" %}<p>✅ 已开始生成，稍后刷新查看。</p>{% elif msg == "saved" %}<p>✅ 已保存。</p>{% endif %}
+{% if msg == "started" %}<p>✅ 已受理，见下方「最近运行」状态，稍后刷新。</p>{% elif msg == "capacity" %}<p>⚠️ 运行队列已满，请稍后再试。</p>{% elif msg == "saved" %}<p>✅ 已保存。</p>{% endif %}
 <div class="card"><h3>订阅偏好 · {{u.email}}</h3>
 <form method="post" action="/users/{{u.id}}/prefs">
 <label>昵称 <input name="name" value="{{u.name}}"></label>
@@ -12,6 +12,9 @@
 <button>保存</button></form>
 <p>下次定时运行：{{next_run or "未调度"}}</p>
 <form method="post" action="/users/{{u.id}}/run"><button>▶ 立即生成今日简报</button></form></div>
+<h3>最近运行</h3><table><tr><th>run</th><th>触发</th><th>状态</th><th>原因</th><th>受理时间</th></tr>
+{% for r in runs %}<tr><td>{{r.run_id}}</td><td>{{r.trigger}}</td><td class="{{r.status}}">{{r.status}}</td><td>{{r.error}}</td><td>{{r.created_at.strftime('%m-%d %H:%M:%S')}}</td></tr>
+{% else %}<tr><td colspan="5">暂无</td></tr>{% endfor %}</table>
 <h3>历史简报</h3><table><tr><th>日期</th><th>状态</th><th>步数</th><th>tokens</th><th></th></tr>
 {% for b in briefs %}<tr><td>{{b.date}}</td><td class="{{b.status}}">{{b.status}} ({{b.stopped_reason}})</td><td>{{b.steps}}</td>
 <td>{{b.tokens_in}}/{{b.tokens_out}}</td><td><a href="/briefs/{{b.id}}">查看 + trace</a></td></tr>

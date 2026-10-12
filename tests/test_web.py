@@ -182,3 +182,82 @@ def test_validate_brief_rules():
     assert validate_brief("\n".join(f"- s https://ex.com/{i}" for i in range(10)), ev) == []
     assert "too many items" in validate_brief("\n".join(f"- s https://ex.com/{i}" for i in range(11)), ev)[0]
     assert "not found" in validate_brief("- s https://evil.com/x", ev)[0]
+
+
+def test_run_is_recorded_before_execution_and_dedups(tmp_path, monkeypatch):
+    """design review P1-3: a run row exists from acceptance; same user can't start two; failures get a terminal state."""
+    from app.llm.providers import FakeProvider
+    from app.db import Run, SessionLocal
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    r1 = service.submit_run(uid, llm=FakeProvider(_writer("- **A** https://ex.com/a")), today="2026-10-11")
+    r2 = service.submit_run(uid, llm=FakeProvider(_writer("x")), today="2026-10-11")
+    service.wait_all()
+    with SessionLocal() as s:
+        runs = s.query(Run).all()
+    assert r1.run_id == r2.run_id or len(runs) == 2  # 第二次要么并入活动 run，要么在第一次结束后才受理
+    assert runs[0].status == "succeeded" and runs[0].brief_id
+
+
+def test_run_init_failure_is_visible(tmp_path, monkeypatch):
+    from app.db import Run, SessionLocal
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    def boom(*a, **k): raise RuntimeError("no API key")
+    monkeypatch.setattr(service, "get_provider", boom)
+    service.submit_run(uid)
+    service.wait_all()
+    with SessionLocal() as s:
+        r = s.query(Run).one()
+    assert r.status == "failed" and "no API key" in r.error
+
+
+def test_idempotency_key_and_interrupted_recovery(tmp_path, monkeypatch):
+    from app.db import Run, SessionLocal
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    with SessionLocal() as s:
+        s.add(Run(run_id="old-1", user_id=uid, trigger="manual", status="running")); s.commit()
+    assert service.recover_interrupted() == 1
+    monkeypatch.setattr(service, "get_provider", lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    a = service.submit_run(uid, trigger="scheduled", idempotency_key="sched:1:2026-10-11")
+    service.wait_all()
+    b = service.submit_run(uid, trigger="scheduled", idempotency_key="sched:1:2026-10-11")
+    assert a.run_id == b.run_id
+    with SessionLocal() as s:
+        assert s.query(Run).filter_by(run_id="old-1").one().status == "interrupted"
+
+
+def test_queue_capacity_is_explicit(tmp_path, monkeypatch):
+    from app import config
+    from app.db import Run, SessionLocal
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "MAX_QUEUED_RUNS", 0)
+    r = service.submit_run(uid)
+    assert r.status == "failed" and r.error.startswith("capacity")
+
+
+def test_run_now_endpoint_and_status(tmp_path, monkeypatch):
+    from app import config, main, service
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
+    from app.tools import news_tools
+    monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "- [hn] A | https://ex.com/a | ")
+    with TestClient(main.app) as c:
+        c.post("/users", data={"name": "E", "email": "e@x.com"})
+        r = c.post("/users/1/run", follow_redirects=False)
+        run_id = r.headers["location"].split("run=")[1]
+        service.wait_all()
+        st = c.get(f"/runs/{run_id}").json()
+        assert st["status"] == "succeeded" and st["brief_id"]
+        assert c.post("/users/999/run").status_code == 404
+
+
+def test_init_db_adds_missing_columns_to_old_db(tmp_path, monkeypatch):
+    import sqlite3
+    from app import config, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    con = sqlite3.connect(tmp_path / "app.db")
+    con.executescript("CREATE TABLE briefs (id INTEGER PRIMARY KEY, user_id INTEGER, date VARCHAR(10), path VARCHAR(300),"
+                      " status VARCHAR(20)); CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(80), email VARCHAR(200));")
+    con.close()
+    db.init_db()
+    cols = {r[1] for r in sqlite3.connect(tmp_path / "app.db").execute("PRAGMA table_info(briefs)")}
+    assert "run_id" in cols

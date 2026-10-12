@@ -10,12 +10,13 @@ scheduler = BackgroundScheduler()
 
 
 def _job(user_id: int):
-    from .service import run_for_user
+    from datetime import date
+    from .service import submit_run
     try:
-        b = run_for_user(user_id)
-        log.info("scheduled brief user=%s status=%s", user_id, b.status)
+        r = submit_run(user_id, trigger="scheduled", idempotency_key=f"sched:{user_id}:{date.today().isoformat()}")
+        log.info("scheduled run user=%s run=%s status=%s", user_id, r.run_id, r.status)
     except Exception:
-        log.exception("scheduled run failed user=%s", user_id)
+        log.exception("scheduled run submit failed user=%s", user_id)
 
 
 def schedule_user(user: User):
