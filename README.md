@@ -59,8 +59,8 @@ tests/                沙箱逃逸、Agent 循环（假 LLM）、适配层转换
 
 ## 设计决策（摘要，详见 [DESIGN.md](docs/DESIGN.md)）
 
-- **输出、发布与历史**：模型只能写本轮 `staging/<run_id>/brief.md`（画像、`runs/`、`briefs/` 对模型只读）。校验通过后由 Service 原子改名发布到 `runs/<日期>/<run_id>.md`，并**追加**一份到 `briefs/<日期>/<run_id>.md` 作去重历史，从不覆盖旧记录（同日 A → B → A 也查得到 A）。简报 HTML 用 `nh3` 白名单清理防 XSS。
-- **内容契约（第一版）**：每份 0–10 条，不凑数；每个链接必须出现在本轮 `web_search`/`fetch_url` 的结果里，否则把错误回传给模型修订（最多 2 次），仍不过记 `validation_failed`。0 条记 `no_news`，不发邮件。程序只能证明“链接来自工具结果”，不能证明摘要事实正确。
+- **输出、发布与历史**：模型只能写本轮 `staging/<run_id>/`（画像、`runs/`、`briefs/` 对模型只读）。校验通过后由 Service 渲染后原子改名发布到 `runs/<日期>/<run_id>.md`，并**追加**一份到 `briefs/<日期>/<run_id>.md` 作去重历史，从不覆盖旧记录（同日 A → B → A 也查得到 A）。简报 HTML 用 `nh3` 白名单清理防 XSS。
+- **结构化内容契约**：工具层给本轮每条 `web_search` 结果和 `fetch_url` 页面分配 `ev_NNN` 证据 ID（保存来源、标题、URL、发布日期、抓取时间、摘录、hash）。模型只写 `staging/<run_id>/draft.json`（0–10 条，每条标题/话题/摘要/推荐理由 + `evidence_ids`，文本里不许有 URL），**不写 Markdown**。Service 校验 schema、证据 ID、同源重复和已发布历史（同一来源再发必须标 `change_type=update` 并给 `delta`），错误回传模型修订（最多 2 次），仍不过记 `validation_failed`；通过后由 Service 渲染 Markdown（链接只来自证据库），并在简报旁保存 `<run_id>.draft.json` 和 `<run_id>.evidence.json`。0 条记 `no_news`，不发邮件。程序只能证明“引用来自本轮工具结果”，不能证明摘要事实正确。
 - **运行与状态**：手动和定时都走 `submit_run`，先写 `runs` 表再执行；同用户已有任务返回同一个 run；全局并发和排队有上限；任何异常都落到 run 终态，重启时遗留任务标 `interrupted`。
 - **时区与补跑**：每用户 IANA 时区，业务日期按用户时区算；定时任务同日只有一个逻辑 run（幂等键），停机错过的在 `CATCHUP_HOURS` 窗口内补一次，DST 跳过的时刻顺延到当天首个有效时刻。
 - **投递**：`deliveries` 表独立记录 `not_configured/pending/sending/sent/failed/unknown`，失败可重发原正文，不重跑模型；不承诺 exactly-once。
