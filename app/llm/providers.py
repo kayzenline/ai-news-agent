@@ -1,5 +1,6 @@
 """具体 adapter：OpenAI 兼容（OpenAI/Grok/DeepSeek/Kimi）、Anthropic Claude、离线 Fake。"""
 import json
+from urllib.parse import urlsplit
 
 from .. import config
 from .base import LLMProvider, LLMResponse, ToolCall
@@ -13,6 +14,10 @@ class OpenAICompatProvider(LLMProvider):
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60, max_retries=2)
         self.model, self.name = model, name
+        # DeepSeek 默认思考模式要求回传 reasoning_content；当前内部消息只保留文本和工具调用。
+        # 官方接口先使用非思考模式，以兼容现有多轮 Agent；不向其他兼容服务发送此扩展参数。
+        self.request_options = ({"extra_body": {"thinking": {"type": "disabled"}}}
+                                if urlsplit(base_url).hostname == "api.deepseek.com" else {})
 
     @staticmethod
     def to_api_messages(messages):
@@ -30,7 +35,8 @@ class OpenAICompatProvider(LLMProvider):
 
     def chat(self, messages, tools):
         r = self.client.chat.completions.create(model=self.model, messages=self.to_api_messages(messages),
-                                                tools=tools or None, temperature=0.3, max_tokens=4096)
+                                                tools=tools or None, temperature=0.3, max_tokens=4096,
+                                                **self.request_options)
         ch = r.choices[0]
         calls = [ToolCall(c.id, c.function.name, c.function.arguments or "{}") for c in (ch.message.tool_calls or [])]
         stop = "tool_use" if calls else _OPENAI_STOP.get(ch.finish_reason, "end")
@@ -106,14 +112,42 @@ class FakeProvider(LLMProvider):
         return self.script.pop(0)
 
 
+def _require_api_key(value: str, variable: str) -> str:
+    key = value.strip()
+    if not key:
+        raise ValueError(f"缺少模型 API 密钥：请在本机 .env 中填写 {variable}，保存后重启服务。")
+    return key
+
+
+def _require_base_url(value: str, variable: str) -> str:
+    url = value.strip()
+    try:
+        parts = urlsplit(url)
+        valid = (parts.scheme in {"http", "https"} and bool(parts.hostname)
+                 and parts.username is None and parts.password is None
+                 and not any(c.isspace() for c in url))
+        # 读取 port 会校验端口数字和范围；不限制服务的域名或路径。
+        parts.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f"模型 API 地址配置无效：请在本机 .env 中将 {variable} 设置为不含账号密码的 http(s) 地址，保存后重启服务。")
+    return url
+
+
 def get_provider() -> LLMProvider:
     p = config.LLM_PROVIDER
     if p == "grok":
-        return OpenAICompatProvider(config.XAI_API_KEY, config.XAI_BASE_URL, config.LLM_MODEL or "grok-4", "grok")
+        key = _require_api_key(config.XAI_API_KEY, "XAI_API_KEY")
+        base_url = _require_base_url(config.XAI_BASE_URL, "XAI_BASE_URL")
+        return OpenAICompatProvider(key, base_url, config.LLM_MODEL or "grok-4", "grok")
     if p == "claude":
-        return ClaudeProvider(config.ANTHROPIC_API_KEY, config.LLM_MODEL or "claude-sonnet-4-5")
+        key = _require_api_key(config.ANTHROPIC_API_KEY, "ANTHROPIC_API_KEY")
+        return ClaudeProvider(key, config.LLM_MODEL or "claude-sonnet-4-5")
     if p == "openai":
-        return OpenAICompatProvider(config.LLM_API_KEY, config.LLM_BASE_URL, config.LLM_MODEL or "gpt-4o-mini", "openai")
+        key = _require_api_key(config.LLM_API_KEY, "LLM_API_KEY")
+        base_url = _require_base_url(config.LLM_BASE_URL, "LLM_BASE_URL")
+        return OpenAICompatProvider(key, base_url, config.LLM_MODEL or "gpt-4o-mini", "openai")
     if p == "fake":
         from .demo import demo_script
         return FakeProvider(demo_script)

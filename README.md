@@ -25,6 +25,34 @@ cp .env.example .env            # 填一个 provider 的 key（见下表）；�
 | `openai` | `LLM_API_KEY`，`LLM_BASE_URL`，`LLM_MODEL` | 任意 OpenAI 兼容接口：OpenAI / DeepSeek / Kimi |
 | `fake` | 无 | 离线演示 / 测试 |
 
+### 使用 OpenAI 兼容服务做真实测试
+
+在本机 `.env` 设置以下四项（使用服务商提供的 API 地址和准确模型名）：
+
+```dotenv
+LLM_PROVIDER=openai
+LLM_API_KEY=在本机填入密钥
+LLM_BASE_URL=https://你的服务商地址/v1
+LLM_MODEL=服务商提供的模型名
+```
+
+`LLM_BASE_URL` 是服务商给出的 API 基础地址，不是网页聊天地址，也不要自行追加 `/chat/completions`。本项目读取的是 `LLM_API_KEY`；仅设置 `OPENAI_API_KEY` 不会替代它。密钥只保存在本机 `.env`（Git 已忽略），不用发到聊天或页面；值直接填写，不加引号。
+
+DeepSeek 官方 V4.1 Flash 的配置如下，API 调用名是 `deepseek-flash`（见 [官方说明](https://api-docs.deepseek.com/)）：
+
+```dotenv
+LLM_PROVIDER=openai
+LLM_API_KEY=在本机填入DeepSeek密钥
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-flash
+```
+
+当前适配器对 DeepSeek 官方地址使用非思考模式，避免多轮工具调用需要回传 `reasoning_content` 的兼容问题（见 [官方思考模式说明](https://api-docs.deepseek.com/guides/thinking_mode/)）。如果密钥来自第三方平台，应使用该平台的 API 地址和模型名；该参数不会自动发送到其他平台。
+
+先运行 `make check-llm`。它只调用一次模型，检查鉴权、响应和工具调用，不搜索新闻、不发送邮件；有少量模型用量。这个检查会实际发送 `tools`、`temperature` 和 `max_tokens`，服务商宣称兼容不代表每个模型都接受这些参数。
+
+检查通过后，先在旧服务终端按 Ctrl+C，再用 `LLM_PROVIDER=openai SMTP_ENABLED=0 ./run.sh` 重启，打开页面生成简报。之前运行中的 fake 服务不会因修改 `.env` 自动切换；进程环境变量优先于 `.env`。
+
 其他：`make test` 跑测试；`TAVILY_API_KEY` 可选；`SMTP_*` 是邮件推送（默认关闭；用户开了邮件但服务没配 SMTP 时，投递状态显示 `not_configured`）；`DEFAULT_TIMEZONE`、`CATCHUP_HOURS`、`MAX_CONCURRENT_RUNS`、`AGENT_MAX_TOOL_CALLS`、`AGENT_RUN_DEADLINE_S` 见 `.env.example`。建表 SQL 在 `schema.sql`；启动时 `create_all` 建缺失表并给旧库补缺失的可空列，这不是完整迁移。
 
 ## 架构
