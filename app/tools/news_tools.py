@@ -3,6 +3,7 @@ import html
 import ipaddress
 import re
 import socket
+import zlib
 from urllib.parse import urljoin, urlsplit
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
@@ -143,28 +144,48 @@ def check_public_url(url: str) -> None:
             raise ValueError(f"blocked non-public address {ip} for host {host}")
 
 
-def _get_limited(url: str) -> httpx.Response:
-    """不自动跟随重定向：每一跳都重新做公网校验；流式读取并限制响应字节数。"""
+FETCH_HEADERS = {**UA, "Accept-Encoding": "gzip, deflate", "Accept": "text/html,text/plain;q=0.9,*/*;q=0.5"}
+
+
+def _decode_body(raw: bytes, encoding: str) -> bytes:
+    """按 Content-Encoding 只解压一次，解压后同样限制在 MAX_FETCH_BYTES（防压缩炸弹）。
+    截断的压缩流尽量解出已有部分；编码错标（声明 gzip 实为明文）或未知编码时退回原始字节。"""
+    enc = encoding.lower().strip()
+    if enc in ("gzip", "x-gzip", "deflate"):
+        for wbits in ((31,) if "gzip" in enc else (15, -15)):
+            try:
+                d = zlib.decompressobj(wbits)
+                return d.decompress(raw, MAX_FETCH_BYTES)
+            except zlib.error:
+                continue
+    return raw[:MAX_FETCH_BYTES]
+
+
+def _get_limited(url: str) -> str:
+    """不自动跟随重定向：每一跳都重新做公网校验；流式读取并限制压缩前/解压后字节数。
+
+    只声明 gzip/deflate，避免依赖 br/zstd 解码器；读原始字节后自行解压一次并返回文本。
+    旧实现把已解压的字节配原响应头重建 Response，会按 Content-Encoding 再解压一次，导致 "incorrect header check"。
+    """
     for _ in range(MAX_REDIRECTS + 1):
         check_public_url(url)
-        with httpx.stream("GET", url, timeout=TIMEOUT, headers=UA, follow_redirects=False) as r:
+        with httpx.stream("GET", url, timeout=TIMEOUT, headers=FETCH_HEADERS, follow_redirects=False) as r:
             if r.is_redirect:
                 url = urljoin(url, r.headers.get("location", ""))
                 continue
             r.raise_for_status()
-            buf = bytearray()
-            for chunk in r.iter_bytes():
-                buf += chunk
-                if len(buf) > MAX_FETCH_BYTES:
-                    break  # 超过上限只保留前 MAX_FETCH_BYTES，不继续下载
-            return httpx.Response(r.status_code, headers=r.headers, content=bytes(buf[:MAX_FETCH_BYTES]),
-                                  request=r.request)
+            raw = bytearray()
+            for chunk in r.iter_raw():  # 原始（可能压缩的）字节，同样受上限约束
+                raw += chunk
+                if len(raw) > MAX_FETCH_BYTES:
+                    break
+            body = _decode_body(bytes(raw), r.headers.get("content-encoding", ""))
+            return body.decode(r.charset_encoding or "utf-8", errors="replace")
     raise ValueError(f"too many redirects (>{MAX_REDIRECTS})")
 
 
 def fetch_url(url: str, max_chars: int = 4000) -> str:
-    r = _get_limited(url)
-    text = re.sub(r"(?is)<(script|style|nav|footer|header).*?</\1>", " ", r.text)
+    text = re.sub(r"(?is)<(script|style|nav|footer|header).*?</\1>", " ", _get_limited(url))
     text = html.unescape(re.sub(r"<[^>]+>", " ", text))
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_chars]

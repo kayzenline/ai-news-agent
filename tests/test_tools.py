@@ -167,12 +167,49 @@ def test_fetch_url_revalidates_each_redirect_and_limits_bytes(monkeypatch):
     def handler(req):
         if req.url.host == "pub.example":
             return httpx.Response(302, headers={"location": "http://internal.example/secret"})
-        return httpx.Response(200, text="secret")
+        return httpx.Response(200, stream=httpx.ByteStream(b"secret"))
     client = httpx.Client(transport=httpx.MockTransport(handler))
     monkeypatch.setattr(httpx, "stream", lambda m, u, **k: client.stream(m, u, follow_redirects=False))
     with pytest.raises(ValueError, match="blocked"):
         news_tools.fetch_url("http://pub.example/a")
-    big = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text="x" * 5_000_000)))
+    big = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=httpx.ByteStream(b"x" * 5_000_000))))
     monkeypatch.setattr(httpx, "stream", lambda m, u, **k: big.stream(m, u, follow_redirects=False))
     monkeypatch.setattr(news_tools, "MAX_FETCH_BYTES", 1000)
     assert len(news_tools.fetch_url("http://ok.example/", max_chars=10**7)) == 1000
+
+
+def _mock_stream(monkeypatch, handler):
+    import httpx
+    from app.tools import news_tools
+    monkeypatch.setattr(news_tools, "check_public_url", lambda u: None)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(httpx, "stream", lambda m, u, **k: client.stream(m, u, headers=k.get("headers")))
+    return news_tools
+
+
+def test_fetch_url_gzip_body_decoded_once(monkeypatch):
+    """regression: decoded bytes were re-wrapped with Content-Encoding: gzip and decompressed twice."""
+    import gzip, httpx
+    seen = {}
+    def handler(req):
+        seen["ae"] = req.headers.get("accept-encoding")
+        return httpx.Response(200, headers={"content-encoding": "gzip", "content-type": "text/html; charset=utf-8"},
+                              stream=httpx.ByteStream(gzip.compress("<p>Agents in your texts — 智能体</p>".encode())))
+    nt = _mock_stream(monkeypatch, handler)
+    assert nt.fetch_url("https://techcrunch.com/x") == "Agents in your texts — 智能体"
+    assert "br" not in seen["ae"] and "zstd" not in seen["ae"]
+
+
+def test_fetch_url_mislabelled_gzip_falls_back(monkeypatch):
+    import httpx
+    nt = _mock_stream(monkeypatch, lambda req: httpx.Response(
+        200, headers={"content-encoding": "gzip"}, stream=httpx.ByteStream(b"<p>plain body</p>")))
+    assert nt.fetch_url("https://ex.com/") == "plain body"
+
+
+def test_fetch_url_gzip_bomb_capped(monkeypatch):
+    import gzip, httpx
+    nt = _mock_stream(monkeypatch, lambda req: httpx.Response(
+        200, headers={"content-encoding": "gzip"}, stream=httpx.ByteStream(gzip.compress(b"a" * 5_000_000))))
+    monkeypatch.setattr(nt, "MAX_FETCH_BYTES", 1000)
+    assert len(nt.fetch_url("https://ex.com/", max_chars=10**7)) == 1000
