@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import datetime
 from email.mime.text import MIMEText
 
 from . import config
@@ -121,7 +121,8 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
         with SessionLocal() as s:
             user = s.get(User, user_id)
             sb = sync_profile(user)
-            today = today or date.today().isoformat()
+            from .scheduler import business_date
+            today = today or business_date(user)  # 业务日期按用户时区，而不是宿主机时区
             run_id = run_id or new_run_id()
             # 模型只能写本轮 staging；画像、briefs/ 历史、runs/ 发布目录对模型只读，只有 Service 发布
             staging = f"staging/{run_id}"

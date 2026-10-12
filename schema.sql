@@ -2,7 +2,7 @@
 -- 应用启动时 create_all 建缺失表，并为旧库补缺失的可空列；这不是完整迁移。
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY, name VARCHAR(80) NOT NULL, email VARCHAR(200) NOT NULL UNIQUE,
-  topics JSON, keywords JSON, language VARCHAR(10) DEFAULT 'zh', send_time VARCHAR(5) DEFAULT '08:00',
+  topics JSON, keywords JSON, language VARCHAR(10) DEFAULT 'zh', send_time VARCHAR(5) DEFAULT '08:00', timezone VARCHAR(64),
   email_enabled INTEGER DEFAULT 0, created_at DATETIME
 );
 CREATE TABLE IF NOT EXISTS briefs (

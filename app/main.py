@@ -4,6 +4,7 @@ import re
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import markdown
 import nh3
@@ -78,13 +79,19 @@ def user_page(request: Request, uid: int):
 
 @app.post("/users/{uid}/prefs")
 def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords: str = Form(""),
-               language: str = Form("zh"), send_time: str = Form("08:00"), email_enabled: str = Form(None)):
+               language: str = Form("zh"), send_time: str = Form("08:00"), email_enabled: str = Form(None),
+               timezone: str = Form("")):
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", send_time or ""):
         raise HTTPException(422, "send_time must be HH:MM (00:00-23:59)")
+    timezone = timezone.strip() or config.DEFAULT_TIMEZONE
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(422, "timezone must be an IANA name such as Australia/Sydney")
     with SessionLocal() as s:
         u = s.get(User, uid) or _404()
         u.name, u.topics, u.keywords, u.language = name, _split(topics), _split(keywords), language
-        u.send_time, u.email_enabled = send_time, 1 if email_enabled else 0
+        u.send_time, u.email_enabled, u.timezone = send_time, 1 if email_enabled else 0, timezone
         s.commit()
         scheduler.schedule_user(u)
     return RedirectResponse(f"/users/{uid}?msg=saved", status_code=303)

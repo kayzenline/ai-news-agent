@@ -19,7 +19,8 @@ class User(Base):
     topics: Mapped[list] = mapped_column(JSON, default=list)
     keywords: Mapped[list] = mapped_column(JSON, default=list)
     language: Mapped[str] = mapped_column(String(10), default="zh")
-    send_time: Mapped[str] = mapped_column(String(5), default="08:00")  # HH:MM 本地时间
+    send_time: Mapped[str] = mapped_column(String(5), default="08:00")  # HH:MM，用户时区内的“每日开始生成时间”
+    timezone: Mapped[str] = mapped_column(String(64), default=lambda: config.DEFAULT_TIMEZONE)  # IANA，如 Australia/Sydney
     email_enabled: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 

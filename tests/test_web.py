@@ -261,3 +261,53 @@ def test_init_db_adds_missing_columns_to_old_db(tmp_path, monkeypatch):
     db.init_db()
     cols = {r[1] for r in sqlite3.connect(tmp_path / "app.db").execute("PRAGMA table_info(briefs)")}
     assert "run_id" in cols
+
+
+def test_business_date_and_catch_up_use_user_timezone(tmp_path, monkeypatch):
+    """design review P1-4: date follows the user's IANA zone; missed runs are caught up once inside the window."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app import scheduler
+    from app.db import SessionLocal, User
+    from app import config
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "CATCHUP_HOURS", 6)
+    with SessionLocal() as s:
+        u = s.get(User, uid); u.timezone, u.send_time = "Australia/Sydney", "08:00"; s.commit()
+        u = s.get(User, uid)
+    utc = ZoneInfo("UTC")
+    # 2026-10-12 22:30 UTC = 2026-10-13 09:30 悉尼（UTC+11）
+    now = datetime(2026, 10, 12, 22, 30, tzinfo=utc)
+    assert scheduler.business_date(u, now) == "2026-10-13"
+    assert scheduler.due_users(datetime(2026, 10, 12, 20, 0, tzinfo=utc)) == []  # 07:00 本地，未到
+    assert scheduler.due_users(now) == [(uid, "2026-10-13")]
+    assert scheduler.due_users(datetime(2026, 10, 13, 5, 0, tzinfo=utc)) == []  # 16:00 本地，超出 6h 补跑窗口
+    monkeypatch.setattr(service, "get_provider", lambda: (_ for _ in ()).throw(RuntimeError("no key")))
+    assert len(scheduler.catch_up(now)) == 1
+    service.wait_all()
+    assert scheduler.due_users(now) == []  # 同日只一个逻辑 run（失败也不会被扫描反复重跑）
+
+
+def test_dst_gap_start_time_still_due(tmp_path, monkeypatch):
+    """Sydney 2026-10-04 02:30 doesn't exist (clocks jump 02:00 -> 03:00); the catch-up scan still fires that day."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app import scheduler
+    from app.db import SessionLocal, User
+    from app import config
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "CATCHUP_HOURS", 6)
+    with SessionLocal() as s:
+        u = s.get(User, uid); u.timezone, u.send_time = "Australia/Sydney", "02:30"; s.commit()
+    assert scheduler.due_users(datetime(2026, 10, 3, 15, 50, tzinfo=ZoneInfo("UTC"))) == []  # 01:50 AEST
+    now = datetime(2026, 10, 3, 16, 10, tzinfo=ZoneInfo("UTC"))  # 03:10 AEDT
+    assert scheduler.due_users(now) == [(uid, "2026-10-04")]
+
+
+def test_invalid_timezone_rejected(tmp_path, monkeypatch):
+    from app import config, main
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    with TestClient(main.app) as c:
+        c.post("/users", data={"name": "A", "email": "a@x.com"})
+        assert c.post("/users/1/prefs", data={"name": "A", "timezone": "Mars/Base"}).status_code == 422
+        assert c.post("/users/1/prefs", data={"name": "A", "timezone": "Australia/Sydney"}).status_code == 200
