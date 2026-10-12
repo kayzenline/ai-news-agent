@@ -8,7 +8,7 @@ from datetime import date
 from email.mime.text import MIMEText
 
 from . import config
-from .agent import Agent, dump_trace
+from .agent import Agent, count_items, dump_trace, validate_brief
 from .db import Brief, SessionLocal, User
 from .llm.providers import get_provider
 from .tools.registry import ToolRegistry
@@ -47,17 +47,28 @@ def run_for_user(user_id: int, llm=None, today: str | None = None) -> Brief:
             tools = ToolRegistry(Sandbox(sb.root, writable=[staging]))
             agent = Agent(llm or get_provider(), tools)
             started = time.time()
-            res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today, output=rel)
-            ok = res.stopped_reason == "model_finished" and _wrote_this_run(res.trace, rel, sb.root / rel, started)
+            draft = sb.root / rel
+
+            def validator(r):
+                if not _wrote_this_run(r.trace, rel, draft, started):
+                    return [f"you have not written a non-empty brief to {rel} in this run"]
+                return validate_brief(draft.read_text(encoding="utf-8"), r.evidence_urls)
+
+            res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today, output=rel,
+                            validator=validator)
+            ok = res.stopped_reason == "model_finished" and _wrote_this_run(res.trace, rel, draft, started)
             path = sb.root / "runs" / today / f"{run_id}.md"
+            status = "failed"
             if ok:
-                path = publish(sb, sb.root / rel, today, run_id)
-            b = Brief(user_id=user.id, date=today, path=str(path), status="ok" if ok else "failed",
+                path = publish(sb, draft, today, run_id)
+                # 0 条合格条目 => no_news（检索正常但没有值得发的内容），不凑数、不发邮件
+                status = "ok" if count_items(path.read_text(encoding="utf-8")) else "no_news"
+            b = Brief(user_id=user.id, date=today, path=str(path), status=status,
                       stopped_reason=res.stopped_reason, steps=res.steps, tokens_in=res.usage["input"],
                       tokens_out=res.usage["output"], trace_json=dump_trace(res.trace))
             s.add(b)
             s.commit()
-            if ok and user.email_enabled:
+            if status == "ok" and user.email_enabled:
                 try:
                     send_email(user.email, f"AI 新闻简报 {today}", path.read_text(encoding="utf-8"))
                 except Exception as e:  # 推送失败不影响简报落盘

@@ -1,4 +1,5 @@
 import importlib
+import json
 from fastapi.testclient import TestClient
 
 
@@ -57,6 +58,9 @@ def _setup(tmp_path, monkeypatch):
         s.add(u); s.commit(); uid = u.id
     sent = []
     monkeypatch.setattr(service, "send_email", lambda *a: sent.append(a))
+    from app.tools import news_tools
+    monkeypatch.setattr(news_tools, "web_search",
+                        lambda query, **k: "- [hn] A | https://ex.com/a | \n- [hn] B | https://ex.com/b | ")
     return service, uid, sent
 
 
@@ -64,7 +68,10 @@ def _writer(text):
     import json, re
     from app.llm.base import LLMResponse, ToolCall
     def model(msgs):
-        if msgs[-1]["role"] == "tool":
+        n = sum(1 for m in msgs if m["role"] == "tool")
+        if n == 0:
+            return LLMResponse("", [ToolCall("s", "web_search", json.dumps({"query": "ai"}))], "tool_use")
+        if n == 2:
             return LLMResponse("done", [], "end")
         out = re.search(r"write today's brief to (\S+)", msgs[0]["content"]).group(1)
         return LLMResponse("", [ToolCall("w", "write_file", json.dumps({"path": out, "content": text}))], "tool_use")
@@ -76,7 +83,7 @@ def test_stale_same_day_file_does_not_mark_run_ok(tmp_path, monkeypatch):
     from app.llm.providers import FakeProvider
     from app.llm.base import LLMResponse
     service, uid, sent = _setup(tmp_path, monkeypatch)
-    b1 = service.run_for_user(uid, llm=FakeProvider(_writer("# First")), today="2026-10-11")
+    b1 = service.run_for_user(uid, llm=FakeProvider(_writer("# First\n- **A** https://ex.com/a")), today="2026-10-11")
     b2 = service.run_for_user(uid, llm=FakeProvider([LLMResponse("nothing", [], "end")]), today="2026-10-11")
     assert b1.status == "ok" and b2.status == "failed"
     assert len(sent) == 1
@@ -88,11 +95,11 @@ def test_same_day_runs_keep_their_own_body(tmp_path, monkeypatch):
     from app.llm.providers import FakeProvider
     from app.tools import fs_tools
     service, uid, _ = _setup(tmp_path, monkeypatch)
-    b1 = service.run_for_user(uid, llm=FakeProvider(_writer("Story A https://ex.com/a")), today="2026-10-11")
-    b2 = service.run_for_user(uid, llm=FakeProvider(_writer("Story B https://ex.com/b")), today="2026-10-11")
+    b1 = service.run_for_user(uid, llm=FakeProvider(_writer("- Story A https://ex.com/a")), today="2026-10-11")
+    b2 = service.run_for_user(uid, llm=FakeProvider(_writer("- Story B https://ex.com/b")), today="2026-10-11")
     assert b1.path != b2.path
-    assert Path(b1.path).read_text() == "Story A https://ex.com/a"
-    assert Path(b2.path).read_text() == "Story B https://ex.com/b"
+    assert Path(b1.path).read_text() == "- Story A https://ex.com/a"
+    assert Path(b2.path).read_text() == "- Story B https://ex.com/b"
     sb = service.workspace(uid)
     assert "ex.com/a" in fs_tools.search_content(sb, "https://ex.com/a", "briefs")
     assert "ex.com/b" in fs_tools.search_content(sb, "https://ex.com/b", "briefs")
@@ -138,3 +145,40 @@ def test_invalid_send_time_rejected_and_startup_survives(tmp_path, monkeypatch):
             s.get(db.User, 1).send_time = "99:99"  # 模拟历史坏数据
             s.commit()
     scheduler.start()  # 不应抛异常
+
+
+def test_fabricated_link_is_fed_back_then_rejected(tmp_path, monkeypatch):
+    """design review P1-1: links must come from this run's tool evidence; errors go back to the model."""
+    from app.llm.providers import FakeProvider
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    b = service.run_for_user(uid, llm=FakeProvider(_always_writer("- **X** https://made-up.example/x")), today="2026-10-11")
+    assert b.status == "failed" and b.stopped_reason == "validation_failed"
+    trace = json.loads(b.trace_json)
+    assert sum(1 for t in trace if t["type"] == "validation") == 3  # 1 次 + 2 次修订
+    assert sent == []
+
+
+def _always_writer(text):
+    import re
+    from app.llm.base import LLMResponse, ToolCall
+    def model(msgs):
+        if msgs[-1]["role"] == "tool":
+            return LLMResponse("done", [], "end")
+        out = re.search(r"write today's brief to (\S+)", msgs[0]["content"]).group(1)
+        return LLMResponse("", [ToolCall("w", "write_file", json.dumps({"path": out, "content": text}))], "tool_use")
+    return model
+
+
+def test_zero_items_is_no_news_and_not_emailed(tmp_path, monkeypatch):
+    from app.llm.providers import FakeProvider
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    b = service.run_for_user(uid, llm=FakeProvider(_writer("# Brief\n今天没有新的相关内容。")), today="2026-10-11")
+    assert b.status == "no_news" and sent == []
+
+
+def test_validate_brief_rules():
+    from app.agent import validate_brief
+    ev = {f"https://ex.com/{i}" for i in range(12)}
+    assert validate_brief("\n".join(f"- s https://ex.com/{i}" for i in range(10)), ev) == []
+    assert "too many items" in validate_brief("\n".join(f"- s https://ex.com/{i}" for i in range(11)), ev)[0]
+    assert "not found" in validate_brief("- s https://evil.com/x", ev)[0]

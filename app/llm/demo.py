@@ -39,7 +39,11 @@ def demo_script(messages):
         items = [l for l in ws.splitlines() if l.startswith("- [")]
         if tool_msgs[-1]["content"] != "no matches" and items:
             items = items[1:]  # 第一条在历史简报里出现过 -> 去重
-        body = "\n".join(f"- **{l.split(' | ')[0][4:].split('] ',1)[-1]}** — {l.split(' | ')[1]}" for l in items[:8]) or "- 今日未检索到新内容（来源不可用或已全部去重）"
+        body = "\n".join(f"- **{l.split(' | ')[0][4:].split('] ',1)[-1]}** — {l.split(' | ')[1]}" for l in items[:8]) or "今日没有新的相关内容（no_news）。"
         md = f"# {profile.get('name','')} 的 AI 新闻简报 · {today}\n\n## {' / '.join(topics)}\n\n{body}\n"
         return _call("write_file", path=out, content=md)
+    last = messages[-1]
+    if last["role"] == "user" and "failed validation" in last["content"]:
+        # 演示模型不会修订：去掉所有链接，退化成 no_news，避免发布未经证据支持的条目
+        return _call("write_file", path=out, content=f"# {profile.get('name','')} 的 AI 新闻简报 · {today}\n\n今日没有可验证的条目（no_news）。\n")
     return LLMResponse(f"已生成 {out}", [], "end")

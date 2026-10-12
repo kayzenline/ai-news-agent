@@ -117,3 +117,10 @@ def test_demo_script_no_cross_user_cache():
     content = json.loads(w.tool_calls[0].arguments)["content"]
     assert ra.tool_calls[0].name == "search_content"
     assert "a.com/1" in content and "b.com" not in content
+
+
+def test_evidence_urls_collected_from_search(tmp_path):
+    script = [tc(1, "web_search", query="LLM"), LLMResponse("done", [], "end")]
+    _, agent = make(tmp_path, script)
+    r = agent.run("go", today="2026-10-11")
+    assert r.evidence_urls == {"https://ex.com/old", "https://ex.com/new"}
