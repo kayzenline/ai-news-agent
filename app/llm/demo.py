@@ -17,8 +17,8 @@ def demo_script(messages):
     tool_msgs = [m for m in messages if m["role"] == "tool"]
     done = [c["name"] for m in messages if m["role"] == "assistant" for c in m.get("tool_calls") or []]
     today = re.search(r"Today is (\d{4}-\d{2}-\d{2})", messages[0]["content"]).group(1)
-    m = re.search(r"write today's brief to (\S+)", messages[0]["content"])
-    out = m.group(1) if m else f"briefs/{today}.md"
+    m = re.search(r"draft to (\S+)", messages[0]["content"])
+    out = m.group(1) if m else "draft.json"
     if "read_file" not in done:
         return _call("read_file", path="profile.json")
     if "list_dir" not in done:
@@ -28,7 +28,7 @@ def demo_script(messages):
     if "web_search" not in done:
         q = " ".join((profile.get("keywords") or topics)[:3])
         return _call("web_search", query=q, sources=["hackernews"], days=2)
-    results = [l for l in tool_msgs[-1]["content"].splitlines() if l.startswith("- [")] if done[-1] == "web_search" else None
+    results = [l for l in tool_msgs[-1]["content"].splitlines() if re.match(r"^- (ev_\d+ )?\[", l)] if done[-1] == "web_search" else None
     if results is not None:
         if results:
             url = results[0].split(" | ")[1]
@@ -36,14 +36,22 @@ def demo_script(messages):
     if "write_file" not in done:
         # 从本次运行自己的消息历史取搜索结果（无模块级共享状态，多用户并发互不串扰）
         ws = tool_msgs[done.index("web_search")]["content"] if "web_search" in done else ""
-        items = [l for l in ws.splitlines() if l.startswith("- [")]
+        items = [l for l in ws.splitlines() if re.match(r"^- ev_\d+ \[", l)]
         if tool_msgs[-1]["content"] != "no matches" and items:
             items = items[1:]  # 第一条在历史简报里出现过 -> 去重
-        body = "\n".join(f"- **{l.split(' | ')[0][4:].split('] ',1)[-1]}** — {l.split(' | ')[1]}" for l in items[:8]) or "今日没有新的相关内容（no_news）。"
-        md = f"# {profile.get('name','')} 的 AI 新闻简报 · {today}\n\n## {' / '.join(topics)}\n\n{body}\n"
-        return _call("write_file", path=out, content=md)
+        topic = topics[0]
+        draft = {"schema_version": 1, "items": [], "note": "演示模型：没有新的候选或全部已报道。"}
+        for l in items[:8]:
+            eid = l.split()[1]
+            title = l.split("] ", 1)[1].split(" | ")[0].strip()
+            draft["items"].append({"title": title, "topic": topic,
+                                   "summary": f"（演示模型，未精读原文）仅根据标题收录：{title}",
+                                   "why_it_matters": f"与你订阅的「{topic}」相关。",
+                                   "evidence_ids": [eid], "event_id": None, "change_type": "new", "delta": None})
+        return _call("write_file", path=out, content=json.dumps(draft, ensure_ascii=False, indent=2))
     last = messages[-1]
     if last["role"] == "user" and "failed validation" in last["content"]:
-        # 演示模型不会修订：去掉所有链接，退化成 no_news，避免发布未经证据支持的条目
-        return _call("write_file", path=out, content=f"# {profile.get('name','')} 的 AI 新闻简报 · {today}\n\n今日没有可验证的条目（no_news）。\n")
+        # 演示模型不会修订：退化成 0 条（no_news），避免发布未通过校验的条目
+        return _call("write_file", path=out, content=json.dumps(
+            {"schema_version": 1, "items": [], "note": "演示模型：草稿未通过校验，本次不发布条目。"}, ensure_ascii=False))
     return LLMResponse(f"已生成 {out}", [], "end")

@@ -10,7 +10,9 @@ from datetime import datetime
 from email.mime.text import MIMEText
 
 from . import config
-from .agent import Agent, count_items, dump_trace, validate_brief
+from .agent import Agent, dump_trace
+from .brief import history_urls, render_markdown, validate_draft
+from .evidence import EvidenceStore
 from .db import Brief, Delivery, Run, SessionLocal, User
 from .llm.providers import get_provider
 from .tools.registry import ToolRegistry
@@ -126,27 +128,42 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
             run_id = run_id or new_run_id()
             # 模型只能写本轮 staging；画像、briefs/ 历史、runs/ 发布目录对模型只读，只有 Service 发布
             staging = f"staging/{run_id}"
-            rel = f"{staging}/brief.md"
+            rel = f"{staging}/draft.json"
             (sb.root / staging).mkdir(parents=True, exist_ok=True)
-            tools = ToolRegistry(Sandbox(sb.root, writable=[staging]))
+            store = EvidenceStore()  # 本轮证据：ID 由工具层分配，模型只能引用
+            tools = ToolRegistry(Sandbox(sb.root, writable=[staging]), evidence=store)
             agent = Agent(llm or get_provider(), tools)
             started = time.time()
             draft = sb.root / rel
+            # 已发布历史的规范 URL 由 Service 读取，用于强制去重（不依赖模型自觉）
+            published = history_urls(f.read_text(encoding="utf-8", errors="ignore")
+                                     for f in (sb.root / "briefs").rglob("*.md"))
+            checked: dict = {}
 
             def validator(r):
                 if not _wrote_this_run(r.trace, rel, draft, started):
-                    return [f"you have not written a non-empty brief to {rel} in this run"]
-                return validate_brief(draft.read_text(encoding="utf-8"), r.evidence_urls)
+                    return [f"you have not written a non-empty draft to {rel} in this run"]
+                d, errs = validate_draft(draft.read_text(encoding="utf-8"), store, published)
+                checked["draft"] = d
+                return errs
 
             res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today, output=rel,
                             validator=validator)
-            ok = res.stopped_reason == "model_finished" and _wrote_this_run(res.trace, rel, draft, started)
+            ok = (res.stopped_reason == "model_finished" and checked.get("draft") is not None
+                  and _wrote_this_run(res.trace, rel, draft, started))
             path = sb.root / "runs" / today / f"{run_id}.md"
             status = "failed"
             if ok:
-                path = publish(sb, draft, today, run_id)
+                d = checked["draft"]
+                # Service 渲染正文：链接只来自证据库，模型文本转义
+                md = sb.root / staging / "brief.md"
+                md.write_text(render_markdown(d, store, user.name, today, user.language), encoding="utf-8")
+                path = publish(sb, md, today, run_id)
+                for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
+                                     (".evidence.json", store.to_json())):
+                    (path.parent / f"{run_id}{suffix}").write_text(body, encoding="utf-8")
                 # 0 条合格条目 => no_news（检索正常但没有值得发的内容），不凑数、不发邮件
-                status = "ok" if count_items(path.read_text(encoding="utf-8")) else "no_news"
+                status = "ok" if d["items"] else "no_news"
             b = Brief(user_id=user.id, date=today, path=str(path), status=status,
                       stopped_reason=res.stopped_reason, steps=res.steps, tokens_in=res.usage["input"],
                       tokens_out=res.usage["output"], trace_json=dump_trace(res.trace), run_id=run_id)

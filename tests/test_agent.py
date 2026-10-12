@@ -16,7 +16,8 @@ def make(tmp_path, script, max_steps=10):
     (sb.root / "briefs" / "2026-10-10.md").write_text("- old story https://ex.com/old\n")
     (sb.root / "profile.json").write_text('{"name":"Edison","topics":["LLM"]}')
     fake_search = lambda query, **k: "- [hn] Old | https://ex.com/old\n- [hn] New | https://ex.com/new"
-    reg = ToolRegistry(sb, extra={"web_search": fake_search})
+    from app.evidence import EvidenceStore
+    reg = ToolRegistry(sb, extra={"web_search": fake_search}, evidence=EvidenceStore())
     return sb, Agent(FakeProvider(script), reg, max_steps=max_steps)
 
 
@@ -70,10 +71,10 @@ def test_llm_exception_stops_cleanly(tmp_path):
 def test_demo_fake_model_end_to_end(tmp_path):
     from app.llm.demo import demo_script
     _, agent = make(tmp_path, demo_script)
-    r = agent.run("go", today="2026-10-11")
+    r = agent.run("go", today="2026-10-11", output="staging/x/draft.json")
     assert r.stopped_reason == "model_finished"
-    brief = (tmp_path / "briefs/2026-10-11.md").read_text()
-    assert "https://ex.com/new" in brief and "https://ex.com/old" not in brief  # 去重生效
+    draft = json.loads((tmp_path / "staging/x/draft.json").read_text())
+    assert [it["evidence_ids"] for it in draft["items"]] == [["ev_002"]]  # ev_001 是旧故事，去重生效
 
 
 HIST = [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"},
@@ -100,9 +101,9 @@ def test_demo_script_no_cross_user_cache():
     """review fix #7: interleave A's search, B's search, A's dedup; A must keep its own results."""
     from app.llm.demo import demo_script
     def hist(name, topic, url):
-        sysm = {"role": "system", "content": "Today is 2026-10-11. write today's brief to runs/x.md (..."}
+        sysm = {"role": "system", "content": "Today is 2026-10-11. write this run's structured draft to staging/x/draft.json (..."}
         calls = [("read_file", '{"name":"%s","topics":["%s"]}' % (name, topic)), ("list_dir", "[F] a"),
-                 ("web_search", f"- [hn] {topic} story | {url} | ")]
+                 ("web_search", f"- ev_00{len(name)} [hn] {topic} story | {url} | ")]
         msgs = [sysm, {"role": "user", "content": "go"}]
         for i, (n, out) in enumerate(calls):
             msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": str(i), "name": n, "arguments": "{}"}]})
@@ -116,14 +117,8 @@ def test_demo_script_no_cross_user_cache():
     w = demo_script(a)
     content = json.loads(w.tool_calls[0].arguments)["content"]
     assert ra.tool_calls[0].name == "search_content"
-    assert "a.com/1" in content and "b.com" not in content
-
-
-def test_evidence_urls_collected_from_search(tmp_path):
-    script = [tc(1, "web_search", query="LLM"), LLMResponse("done", [], "end")]
-    _, agent = make(tmp_path, script)
-    r = agent.run("go", today="2026-10-11")
-    assert r.evidence_urls == {"https://ex.com/old", "https://ex.com/new"}
+    items = json.loads(content)["items"]
+    assert [it["evidence_ids"] for it in items] == [["ev_005"]] and "Robotics" in items[0]["title"]
 
 
 def test_equivalent_args_count_as_repeats(tmp_path):
