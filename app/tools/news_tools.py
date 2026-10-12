@@ -159,8 +159,15 @@ def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> s
         if s not in fns:
             errors.append(f"unknown source {s}")
             continue
+        if s == "tavily" and not config.TAVILY_API_KEY:
+            notes.append("tavily: not configured on this server, skipped (use hackernews/rss/arxiv)")
+            continue
         try:
             results.extend(fns[s]())
+        except httpx.HTTPStatusError as e:  # 简短说明，不回显响应正文
+            code = e.response.status_code
+            hint = " (check TAVILY_API_KEY)" if s == "tavily" and code in (401, 403) else ""
+            errors.append(f"{s}: HTTP {code}{hint}")
         except Exception as e:  # 单个来源失败不影响其它来源，错误回传给模型
             errors.append(f"{s}: {type(e).__name__}: {e}")
     lines = [f"- [{x['source']}] {x['title']} | {x['url']} | {x.get('date','')}" + (f" | {x['summary']}" if x.get("summary") else "")

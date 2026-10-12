@@ -119,6 +119,8 @@ def test_days_window_applies_to_rss_arxiv_tavily(monkeypatch):
     from datetime import datetime, timezone
     from email.utils import format_datetime
     from app.tools import news_tools as N
+    from app import config
+    monkeypatch.setattr(config, "TAVILY_API_KEY", "test-key")  # 未配置时 tavily 会被跳过
     now = datetime.now(timezone.utc)
     sent = {}
 
@@ -266,3 +268,30 @@ def test_arxiv_uses_https_and_only_follows_arxiv_redirects(monkeypatch):
         302, headers={"location": "http://169.254.169.254/"}, request=httpx.Request("GET", url)))
     with pytest.raises(ValueError, match="unexpected location"):
         N._arxiv("x", 2)
+
+
+def test_tavily_hidden_and_skipped_without_key(monkeypatch, tmp_path):
+    from app import config
+    from app.tools import news_tools as N
+    from app.tools.registry import ToolRegistry
+    from app.tools.sandbox import Sandbox
+    monkeypatch.setattr(config, "TAVILY_API_KEY", "")
+    monkeypatch.setattr(N.httpx, "post", lambda *a, **k: pytest.fail("must not call tavily"))
+    ws = next(s for s in ToolRegistry(Sandbox(tmp_path)).schemas() if s["function"]["name"] == "web_search")["function"]
+    assert "tavily" not in ws["description"] and "tavily" not in ws["parameters"]["properties"]["sources"]["items"]["enum"]
+    out = N.web_search("x", sources=["tavily"])
+    assert "tavily: not configured" in out and "errors" not in out
+    monkeypatch.setattr(config, "TAVILY_API_KEY", "k")
+    ws = next(s for s in ToolRegistry(Sandbox(tmp_path)).schemas() if s["function"]["name"] == "web_search")["function"]
+    assert "tavily" in ws["parameters"]["properties"]["sources"]["items"]["enum"]
+
+
+def test_tavily_401_is_concise(monkeypatch):
+    import httpx
+    from app import config
+    from app.tools import news_tools as N
+    monkeypatch.setattr(config, "TAVILY_API_KEY", "bad")
+    monkeypatch.setattr(N.httpx, "post", lambda url, **k: httpx.Response(
+        401, text='{"detail":"secret-ish body"}', request=httpx.Request("POST", url)))
+    out = N.web_search("x", sources=["tavily"])
+    assert out.endswith("errors: tavily: HTTP 401 (check TAVILY_API_KEY)") and "secret-ish" not in out

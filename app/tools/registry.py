@@ -27,6 +27,16 @@ TOOL_SCHEMAS = [
 ]
 
 
+def _without_tavily(schema: dict) -> dict:
+    """未配置 TAVILY_API_KEY 时不向模型宣传 tavily。"""
+    import copy
+    s = copy.deepcopy(schema)
+    f = s["function"]
+    f["description"] = f["description"].replace(", tavily (if configured)", "")
+    f["parameters"]["properties"]["sources"]["items"]["enum"] = ["hackernews", "rss", "arxiv"]
+    return s
+
+
 class ToolRegistry:
     def __init__(self, sandbox: Sandbox, extra: dict[str, Callable] | None = None, evidence=None):
         self.sb = sandbox
@@ -44,7 +54,8 @@ class ToolRegistry:
             self.impl.update(extra)
 
     def schemas(self):
-        return [s for s in TOOL_SCHEMAS if s["function"]["name"] in self.impl]
+        return [_without_tavily(s) if s["function"]["name"] == "web_search" and not config.TAVILY_API_KEY else s
+                for s in TOOL_SCHEMAS if s["function"]["name"] in self.impl]
 
     def call(self, name: str, raw_args: str) -> tuple[bool, str]:
         """返回 (ok, output)。任何异常都不会抛出循环，而是作为文本反馈给模型让它自我纠正。"""
