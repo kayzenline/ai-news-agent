@@ -57,7 +57,8 @@ def _setup(tmp_path, monkeypatch):
         u = db.User(name="Edison", email="e@x.com", email_enabled=1)
         s.add(u); s.commit(); uid = u.id
     sent = []
-    monkeypatch.setattr(service, "send_email", lambda *a: sent.append(a))
+    monkeypatch.setitem(config.SMTP, "enabled", True)
+    monkeypatch.setattr(service, "send_email", lambda *a, **k: sent.append(a))
     from app.tools import news_tools
     monkeypatch.setattr(news_tools, "web_search",
                         lambda query, **k: "- [hn] A | https://ex.com/a | \n- [hn] B | https://ex.com/b | ")
@@ -311,3 +312,50 @@ def test_invalid_timezone_rejected(tmp_path, monkeypatch):
         c.post("/users", data={"name": "A", "email": "a@x.com"})
         assert c.post("/users/1/prefs", data={"name": "A", "timezone": "Mars/Base"}).status_code == 422
         assert c.post("/users/1/prefs", data={"name": "A", "timezone": "Australia/Sydney"}).status_code == 200
+
+
+def test_delivery_is_separate_from_generation(tmp_path, monkeypatch):
+    """design review P1-5: email outcome has its own record; retry resends the same body without rerunning the model."""
+    from pathlib import Path
+    from app import config
+    from app.db import Delivery, SessionLocal
+    from app.llm.providers import FakeProvider
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    calls = []
+    def flaky(to, subject, body, **k):
+        calls.append(body)
+        if len(calls) == 1:
+            raise OSError("smtp down")
+    monkeypatch.setattr(service, "send_email", flaky)
+    b = service.run_for_user(uid, llm=FakeProvider(_writer("- **A** https://ex.com/a")), today="2026-10-11")
+    assert b.status == "ok" and b.stopped_reason == "model_finished"  # 不再把邮件错误拼进生成结果
+    with SessionLocal() as s:
+        d = s.query(Delivery).one()
+    assert d.status == "failed" and "smtp down" in d.last_error
+    d = service.deliver(d.id)
+    assert d.status == "sent" and d.attempts == 2 and calls[0] == calls[1] == Path(b.path).read_text()
+    service.deliver(d.id)
+    assert len(calls) == 2  # sent 后不再重复发送
+
+
+def test_email_on_but_smtp_off_is_visible(tmp_path, monkeypatch):
+    from app import config
+    from app.db import Delivery, SessionLocal
+    from app.llm.providers import FakeProvider
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    monkeypatch.setitem(config.SMTP, "enabled", False)
+    service.run_for_user(uid, llm=FakeProvider(_writer("- **A** https://ex.com/a")), today="2026-10-11")
+    with SessionLocal() as s:
+        assert s.query(Delivery).one().status == "not_configured"
+    assert sent == []
+
+
+def test_stuck_sending_marked_unknown(tmp_path, monkeypatch):
+    from app.db import Brief, Delivery, SessionLocal
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    with SessionLocal() as s:
+        b = Brief(user_id=uid, date="2026-10-11", path="x", status="ok"); s.add(b); s.flush()
+        s.add(Delivery(brief_id=b.id, recipient="e@x.com", status="sending")); s.commit()
+    assert service.mark_stuck_deliveries() == 1
+    with SessionLocal() as s:
+        assert s.query(Delivery).one().status == "unknown"

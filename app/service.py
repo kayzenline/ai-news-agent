@@ -11,7 +11,7 @@ from email.mime.text import MIMEText
 
 from . import config
 from .agent import Agent, count_items, dump_trace, validate_brief
-from .db import Brief, Run, SessionLocal, User
+from .db import Brief, Delivery, Run, SessionLocal, User
 from .llm.providers import get_provider
 from .tools.registry import ToolRegistry
 from .tools.sandbox import Sandbox
@@ -151,13 +151,19 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
                       stopped_reason=res.stopped_reason, steps=res.steps, tokens_in=res.usage["input"],
                       tokens_out=res.usage["output"], trace_json=dump_trace(res.trace), run_id=run_id)
             s.add(b)
-            s.commit()
+            s.flush()
+            d = None
             if status == "ok" and user.email_enabled:
-                try:
-                    send_email(user.email, f"AI 新闻简报 {today}", path.read_text(encoding="utf-8"))
-                except Exception as e:  # 推送失败不影响简报落盘
-                    b.stopped_reason += f" (email failed: {e})"
-                    s.commit()
+                # 简报与待发送记录在同一事务提交；提交后才投递
+                d = Delivery(brief_id=b.id, channel="email", recipient=user.email,
+                             status="pending" if config.SMTP["enabled"] else "not_configured",
+                             message_id=f"<brief-{b.id}-{run_id}@ai-news-agent>")
+                if not config.SMTP["enabled"]:
+                    d.last_error = "SMTP_ENABLED=0: email is on for this user but the server has no SMTP configured"
+                s.add(d)
+            s.commit()
+            if d is not None and d.status == "pending":
+                deliver(d.id)
             return b
     finally:
         lock.release()
@@ -185,12 +191,50 @@ def _wrote_this_run(trace, rel: str, path, started: float) -> bool:
             and path.read_text(encoding="utf-8").strip() != "")
 
 
-def send_email(to: str, subject: str, body: str):
+def deliver(delivery_id: int) -> Delivery:
+    """发送（或重发）一条投递记录对应的原简报正文。SMTP 接受才记 sent；不承诺 exactly-once。"""
+    with SessionLocal() as s:
+        d = s.get(Delivery, delivery_id)
+        if d is None:
+            raise LookupError(delivery_id)
+        if d.status == "sent":
+            return d
+        if not config.SMTP["enabled"]:
+            d.status, d.last_error = "not_configured", "SMTP_ENABLED=0"
+            s.commit()
+            return d
+        b = s.get(Brief, d.brief_id)
+        d.status, d.attempts = "sending", d.attempts + 1
+        s.commit()
+        try:
+            from pathlib import Path
+            send_email(d.recipient, f"AI 新闻简报 {b.date}", Path(b.path).read_text(encoding="utf-8"),
+                       message_id=d.message_id)
+            d.status, d.last_error = "sent", ""
+        except Exception as e:
+            d.status, d.last_error = "failed", f"{type(e).__name__}: {e}"[:500]
+        s.commit()
+        return d
+
+
+def mark_stuck_deliveries() -> int:
+    """重启时仍是 sending 的投递：SMTP 可能已接受，结果未知，标 unknown，由用户决定是否重发。"""
+    with SessionLocal() as s:
+        rows = s.query(Delivery).filter_by(status="sending").all()
+        for d in rows:
+            d.status, d.last_error = "unknown", "process stopped while sending; may or may not have been delivered"
+        s.commit()
+        return len(rows)
+
+
+def send_email(to: str, subject: str, body: str, message_id: str = ""):
     c = config.SMTP
     if not c["enabled"]:
-        return
+        raise RuntimeError("SMTP is not configured")
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"], msg["From"], msg["To"] = subject, c["from"] or c["user"], to
+    if message_id:
+        msg["Message-ID"] = message_id
     with smtplib.SMTP_SSL(c["host"], c["port"], timeout=20) as srv:
         srv.login(c["user"], c["password"])
         srv.send_message(msg)

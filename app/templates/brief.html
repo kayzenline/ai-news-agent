@@ -1,8 +1,12 @@
 {% extends "base.html" %}{% block body %}
 <p><a href="/users/{{b.user_id}}">← 返回</a> · {{b.date}} · <span class="{{b.status}}">{{b.status}}</span> · {{b.stopped_reason}} · {{b.steps}} 步</p>
 <div class="card">{{html|safe}}</div>
+<h3>投递</h3>{% for d in deliveries %}<p>{{d.channel}} → {{d.recipient}} · <span class="{{d.status}}">{{d.status}}</span> · 尝试 {{d.attempts}} 次 {% if d.last_error %}· {{d.last_error}}{% endif %}
+{% if d.status in ("failed", "unknown", "pending") %}<form method="post" action="/deliveries/{{d.id}}/retry" style="display:inline"><button>重发原简报</button></form>{% endif %}</p>
+{% else %}<p>未开启推送（disabled）</p>{% endfor %}
 <h3>Agent Trace（模型自主决定的工具调用）</h3>
 {% for t in trace %}<div class="card"><b>step {{t.step}} · {{t.type}}{% if t.name %} · {{t.name}}{% endif %}</b> {% if t.ms is defined %}({{t.ms}} ms){% endif %}
 {% if t.type == "llm" %}{% if t.text %}<pre>{{t.text}}</pre>{% endif %}{% for c in t.tool_calls %}<div>→ <code>{{c.name}}({{c.arguments}})</code></div>{% endfor %}
 {% elif t.type == "tool" %}<div><code>{{t.arguments}}</code> {{ "✅" if t.ok else "❌" }}</div><pre>{{t.output}}</pre>
+{% elif t.type == "validation" %}<pre>{{t.errors|join("\n")}}</pre>
 {% else %}<pre>{{t.error}}</pre>{% endif %}</div>{% endfor %}{% endblock %}

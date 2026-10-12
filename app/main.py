@@ -13,8 +13,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from . import config, scheduler
-from .db import Brief, Run, SessionLocal, User, init_db
-from .service import recover_interrupted, submit_run
+from .db import Brief, Delivery, Run, SessionLocal, User, init_db
+from .service import deliver, mark_stuck_deliveries, recover_interrupted, submit_run
 
 logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -34,6 +34,7 @@ def render_markdown(md: str) -> str:
 async def lifespan(app):
     init_db()
     recover_interrupted()
+    mark_stuck_deliveries()
     scheduler.start()
     yield
     if scheduler.scheduler.running:
@@ -120,10 +121,22 @@ def run_status(run_id: str):
 def brief_page(request: Request, bid: int):
     with SessionLocal() as s:
         b = s.get(Brief, bid) or _404()
+        deliveries = s.query(Delivery).filter_by(brief_id=bid).all()
     p = Path(b.path)
     md = p.read_text(encoding="utf-8") if p.exists() else "_（简报文件不存在，见 trace）_"
     return templates.TemplateResponse(request, "brief.html", {"b": b, "html": render_markdown(md),
-                                      "trace": json.loads(b.trace_json or "[]")})
+                                      "trace": json.loads(b.trace_json or "[]"),
+                                      "deliveries": deliveries})
+
+
+@app.post("/deliveries/{did}/retry")
+def retry_delivery(did: int):
+    """显式重发原简报（不重跑模型）。sent 状态不会重复发送。"""
+    with SessionLocal() as s:
+        d = s.get(Delivery, did) or _404()
+        bid = d.brief_id
+    deliver(did)
+    return RedirectResponse(f"/briefs/{bid}", status_code=303)
 
 
 def _404():

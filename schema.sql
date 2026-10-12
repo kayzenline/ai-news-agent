@@ -17,3 +17,9 @@ CREATE TABLE IF NOT EXISTS runs (
   error TEXT DEFAULT '', brief_id INTEGER, created_at DATETIME, started_at DATETIME, finished_at DATETIME
 );
 CREATE INDEX IF NOT EXISTS ix_runs_user_id ON runs(user_id);
+CREATE TABLE IF NOT EXISTS deliveries (
+  id INTEGER PRIMARY KEY, brief_id INTEGER NOT NULL REFERENCES briefs(id), channel VARCHAR(20) NOT NULL,
+  recipient VARCHAR(200) NOT NULL, status VARCHAR(20) NOT NULL, attempts INTEGER DEFAULT 0, last_error TEXT,
+  message_id VARCHAR(200), updated_at DATETIME, UNIQUE (brief_id, channel, recipient)
+);
+CREATE INDEX IF NOT EXISTS ix_deliveries_brief_id ON deliveries(brief_id);

@@ -1,7 +1,7 @@
 """SQLite + SQLAlchemy：users / briefs 两张表，启动时 create_all（轻量 migration）。"""
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy import JSON, UniqueConstraint, DateTime, ForeignKey, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from . import config
@@ -39,6 +39,22 @@ class Brief(Base):
     trace_json: Mapped[str] = mapped_column(Text, default="[]")
     run_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class Delivery(Base):
+    """投递与生成解耦：一份简报每个渠道/收件人一条记录，失败只重发原正文，不重跑模型。"""
+    __tablename__ = "deliveries"
+    __table_args__ = (UniqueConstraint("brief_id", "channel", "recipient"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    brief_id: Mapped[int] = mapped_column(ForeignKey("briefs.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(20), default="email")
+    recipient: Mapped[str] = mapped_column(String(200))
+    # disabled | not_configured | pending | sending | sent | failed | unknown
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    message_id: Mapped[str] = mapped_column(String(200), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class Run(Base):
