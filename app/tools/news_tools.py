@@ -58,9 +58,36 @@ def _arxiv(query: str, days: int) -> list[dict]:
             for e in feed.entries if _recent(_entry_dt(e), days)]
 
 
-def _rss(query: str, days: int, errors: list | None = None) -> list[dict]:
-    words = [w.lower() for w in query.split() if len(w) > 1]
-    out = []
+STOPWORDS = {"the", "and", "for", "with", "news", "latest", "of", "in", "on", "to", "a", "an"}
+CJK_RE = re.compile(r"[\u3400-\u9fff]+")
+
+
+def query_terms(query: str) -> tuple[list[re.Pattern], list[str]]:
+    """英文词按词边界匹配（避免 "ai" 命中 "said"）；中文连续串用本身及二元组做子串匹配。"""
+    ascii_terms = [w for w in re.findall(r"[a-z0-9][a-z0-9+.\-]*", query.lower()) if w not in STOPWORDS]
+    pats = [re.compile(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])") for w in ascii_terms]
+    cjk = []
+    for run in CJK_RE.findall(query):
+        cjk.append(run)
+        if len(run) > 2:
+            cjk += [run[i:i + 2] for i in range(len(run) - 1)]
+    return pats, list(dict.fromkeys(cjk))
+
+
+def _score(title: str, summary: str, pats, cjk) -> int:
+    t, sm = title.lower(), summary.lower()
+    score = 0
+    for p in pats:
+        score += 2 * bool(p.search(t)) + bool(p.search(sm))
+    for w in cjk:
+        score += 2 * (w in title) + (w in summary)
+    return score
+
+
+def _rss(query: str, days: int, errors: list | None = None, notes: list | None = None) -> list[dict]:
+    """按查询词给 RSS 条目打分排序；没有任何命中时如实说明，只附少量最新条目并标 unmatched。"""
+    pats, cjk = query_terms(query)
+    scored, recent = [], []
     for name, url in RSS_FEEDS.items():
         try:
             r = httpx.get(url, timeout=TIMEOUT, headers=UA, follow_redirects=True)
@@ -71,11 +98,23 @@ def _rss(query: str, days: int, errors: list | None = None) -> list[dict]:
                 errors.append(f"rss/{name}: {type(e).__name__}: {e}")
             continue
         for e in feed.entries[:30]:
-            text = (e.get("title", "") + " " + e.get("summary", "")).lower()
-            if (not words or any(w in text for w in words)) and _recent(_entry_dt(e), days):
-                out.append({"source": name, "title": e.get("title"), "url": e.get("link"),
-                            "date": _fmt(_entry_dt(e), 16)})
-    return out[:10]
+            dt = _entry_dt(e)
+            if not _recent(dt, days):
+                continue
+            item = {"source": name, "title": e.get("title"), "url": e.get("link"), "date": _fmt(dt, 16), "_dt": dt}
+            sc = _score(e.get("title", ""), e.get("summary", ""), pats, cjk) if (pats or cjk) else 1
+            (scored if sc > 0 else recent).append((sc, item))
+    key = lambda x: (x[0], x[1]["_dt"] or datetime.min.replace(tzinfo=timezone.utc))
+    if scored:
+        out = [i for _, i in sorted(scored, key=key, reverse=True)[:10]]
+    else:
+        out = [dict(i, summary="unmatched: recent item, does not contain the query terms")
+               for _, i in sorted(recent, key=key, reverse=True)[:3]]
+        if notes is not None:
+            notes.append(f"rss: no items matched {query!r}; showing {len(out)} most recent unfiltered items flagged 'unmatched' (try English keywords)")
+    for i in out:
+        i.pop("_dt", None)
+    return out
 
 
 def _tavily(query: str, days: int) -> list[dict]:
@@ -98,8 +137,8 @@ def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> s
     sources = sources or (["tavily"] if config.TAVILY_API_KEY else ["hackernews", "rss", "arxiv"])
     fns = {"hackernews": lambda: _hn(query, days), "arxiv": lambda: _arxiv(query, days), "rss": lambda: _rss(query, days),
            "tavily": lambda: _tavily(query, days)}
-    results, errors = [], []
-    fns["rss"] = lambda: _rss(query, days, errors)
+    results, errors, notes = [], [], []
+    fns["rss"] = lambda: _rss(query, days, errors, notes)
     for s in sources:
         if s not in fns:
             errors.append(f"unknown source {s}")
@@ -110,6 +149,8 @@ def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> s
             errors.append(f"{s}: {type(e).__name__}: {e}")
     lines = [f"- [{x['source']}] {x['title']} | {x['url']} | {x.get('date','')}" + (f" | {x['summary']}" if x.get("summary") else "")
              for x in results]
+    if notes:
+        lines.append("notes: " + "; ".join(notes))
     if errors:
         lines.append("errors: " + "; ".join(errors))
     return "\n".join(lines) or "no results"

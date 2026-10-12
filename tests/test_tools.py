@@ -213,3 +213,37 @@ def test_fetch_url_gzip_bomb_capped(monkeypatch):
         200, headers={"content-encoding": "gzip"}, stream=httpx.ByteStream(gzip.compress(b"a" * 5_000_000))))
     monkeypatch.setattr(nt, "MAX_FETCH_BYTES", 1000)
     assert len(nt.fetch_url("https://ex.com/", max_chars=10**7)) == 1000
+
+
+RSS_MIX = """<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>
+<item><title>Company said profits rose</title><link>https://ex.com/said</link><description>maintain</description></item>
+<item><title>New AI agent framework</title><link>https://ex.com/agent</link><description>tools</description></item>
+<item><title>Robotics startup raises</title><link>https://ex.com/robot</link><description>AI robots</description></item>
+<item><title>大模型推理加速新方法</title><link>https://ex.com/zh</link><description>推理</description></item>
+</channel></rss>"""
+
+
+def _rss_mock(monkeypatch):
+    import httpx
+    from app.tools import news_tools as N
+    monkeypatch.setattr(N, "RSS_FEEDS", {"feed": "https://feed.example/rss"})
+    monkeypatch.setattr(N.httpx, "get", lambda *a, **k: httpx.Response(200, content=RSS_MIX.encode(),
+                                                                       request=httpx.Request("GET", a[0])))
+    return N
+
+
+def test_rss_filters_and_ranks_by_query(monkeypatch):
+    N = _rss_mock(monkeypatch)
+    out = N.web_search("AI agent", sources=["rss"], days=3650)
+    lines = [l for l in out.splitlines() if l.startswith("- [")]
+    assert "ex.com/agent" in lines[0] and "ex.com/robot" in out and "ex.com/said" not in out
+    assert "ex.com/zh" in N.web_search("大模型", sources=["rss"], days=3650)
+    assert "ex.com/zh" in N.web_search("模型推理", sources=["rss"], days=3650)  # 中文二元组
+
+
+def test_rss_no_match_is_reported_not_silent(monkeypatch):
+    N = _rss_mock(monkeypatch)
+    out = N.web_search("quantum chemistry", sources=["rss"], days=3650)
+    assert "notes: rss: no items matched" in out
+    items = [l for l in out.splitlines() if l.startswith("- [")]
+    assert len(items) <= 3 and all("unmatched" in l for l in items)
