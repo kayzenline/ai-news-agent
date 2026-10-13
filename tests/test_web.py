@@ -255,6 +255,62 @@ def test_run_now_endpoint_and_status(tmp_path, monkeypatch):
         assert c.post("/users/999/run").status_code == 404
 
 
+def test_activity_snapshot_tracks_completion_and_only_current_user(tmp_path, monkeypatch):
+    """页面轮询能看到新运行和终态，且快照仅包含该用户的记录。"""
+    from app import config, main
+    from app.db import Brief, Run, SessionLocal, User
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    with TestClient(main.app) as c:
+        c.post("/users", data={"name": "E", "email": "e@x.com"})
+        with SessionLocal() as s:
+            other = User(name="Other", email="other@x.com")
+            s.add(other); s.flush()
+            s.add(Run(run_id="other-run", user_id=other.id, trigger="manual", status="failed", error="private"))
+            s.add(Run(run_id="watched", user_id=1, trigger="scheduled", status="running"))
+            s.add(Brief(user_id=other.id, date="2026-10-13", path="private-path", status="ok"))
+            s.commit()
+        response = c.get("/users/1/activity")
+        assert response.headers["cache-control"] == "no-store"
+        assert [r["run_id"] for r in response.json()["runs"]] == ["watched"]
+        assert response.json()["runs"][0]["status"] == "running"
+        assert response.json()["briefs"] == []
+        with SessionLocal() as s:
+            brief = Brief(user_id=1, date="2026-10-13", path="local-path", status="ok",
+                          stopped_reason="model_finished", steps=3, tokens_in=20, tokens_out=10)
+            s.add(brief); s.flush()
+            run = s.query(Run).filter_by(run_id="watched").one()
+            run.status, run.brief_id = "succeeded", brief.id
+            s.commit(); bid = brief.id
+        finished = c.get("/users/1/activity").json()
+        assert finished["runs"][0]["status"] == "succeeded"
+        assert finished["runs"][0]["brief_id"] == bid
+        assert finished["briefs"][0]["id"] == bid
+        assert finished["briefs"][0]["tokens_in"] == 20
+        assert "path" not in finished["briefs"][0] and "trace_json" not in finished["briefs"][0]
+        assert c.get("/users/999/activity").status_code == 404
+
+
+def test_run_now_supports_json_without_navigation(tmp_path, monkeypatch):
+    """JS 提交使用 JSON，普通表单继续跳转；异常结果也能直接显示。"""
+    from app import config, main, service
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(service, "get_provider", lambda: (_ for _ in ()).throw(RuntimeError("test failure")))
+    with TestClient(main.app) as c:
+        c.post("/users", data={"name": "E", "email": "e@x.com"})
+        response = c.post("/users/1/run", headers={"Accept": "application/json"})
+        assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+        assert "location" not in response.headers
+        run_id = response.json()["run_id"]
+        service.wait_all()
+        run = c.get("/users/1/activity").json()["runs"][0]
+        assert run["run_id"] == run_id and run["status"] == "failed"
+        assert "test failure" in run["error"]
+        page = c.get("/users/1")
+        assert 'id="run-status"' in page.text and 'id="generate-form"' in page.text
+        assert c.get("/static/user_status.js").status_code == 200
+        assert c.post("/users/999/run", headers={"Accept": "application/json"}).status_code == 404
+
+
 def test_init_db_adds_missing_columns_to_old_db(tmp_path, monkeypatch):
     import sqlite3
     from app import config, db

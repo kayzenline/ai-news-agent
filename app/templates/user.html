@@ -1,5 +1,8 @@
 {% extends "base.html" %}{% block body %}
-{% if msg == "started" %}<p>✅ 已受理，见下方「最近运行」状态，稍后刷新。</p>{% elif msg == "capacity" %}<p>⚠️ 运行队列已满，请稍后再试。</p>{% elif msg == "saved" %}<p>✅ 已保存。</p>{% endif %}
+{% if msg == "saved" %}<p>✅ 已保存。</p>{% endif %}
+<p id="run-status" role="status" aria-live="polite" data-user-id="{{u.id}}" data-run-id="{{requested_run}}">{% if msg == "started" %}⏳ 已受理，正在获取运行状态…{% elif msg == "capacity" %}⚠️ 运行队列已满，请稍后再试。{% else %}运行状态会自动更新。{% endif %}</p>
+<p id="run-connection" role="status" aria-live="polite" hidden></p>
+<noscript><p>启用 JavaScript 后可自动查看运行结果；当前需手动刷新页面。</p></noscript>
 <div class="card"><h3>订阅偏好 · {{u.email}}</h3>
 <form method="post" action="/users/{{u.id}}/prefs">
 <label>昵称 <input name="name" value="{{u.name}}"></label>
@@ -12,11 +15,12 @@
 <label><input type="checkbox" name="email_enabled" {% if u.email_enabled %}checked{% endif %}> 邮件推送（需配置 SMTP）</label>
 <button>保存</button></form>
 <p>下次定时运行：{{next_run or "未调度"}}（生成需要时间，邮件会晚于开始时间）</p>
-<form method="post" action="/users/{{u.id}}/run"><button>▶ 立即生成今日简报</button></form></div>
-<h3>最近运行</h3><table><tr><th>run</th><th>触发</th><th>状态</th><th>原因</th><th>受理时间</th></tr>
-{% for r in runs %}<tr><td>{{r.run_id}}</td><td>{{r.trigger}}</td><td class="{{r.status}}">{{r.status}}</td><td>{{r.error}}</td><td>{{r.created_at.strftime('%m-%d %H:%M:%S')}}</td></tr>
-{% else %}<tr><td colspan="5">暂无</td></tr>{% endfor %}</table>
-<h3>历史简报</h3><table><tr><th>日期</th><th>状态</th><th>步数</th><th>tokens</th><th></th></tr>
-{% for b in briefs %}<tr><td>{{b.date}}</td><td class="{{b.status}}">{{b.status}} ({{b.stopped_reason}})</td><td>{{b.steps}}</td>
+<form id="generate-form" method="post" action="/users/{{u.id}}/run"><button>▶ 立即生成今日简报</button></form></div>
+<h3>最近运行</h3><table><thead><tr><th>run</th><th>触发</th><th>状态</th><th>原因</th><th>受理时间</th></tr></thead><tbody id="runs-body">
+{% for r in runs %}<tr data-run-id="{{r.run_id}}" data-status="{{r.status}}"><td>{{r.run_id}}</td><td>{{r.trigger}}</td><td class="{{r.status}}">{{r.status}}</td><td>{{r.error}}</td><td>{{r.created_at.strftime('%m-%d %H:%M:%S')}}</td></tr>
+{% else %}<tr><td colspan="5">暂无</td></tr>{% endfor %}</tbody></table>
+<h3>历史简报</h3><table><thead><tr><th>日期</th><th>状态</th><th>步数</th><th>tokens</th><th></th></tr></thead><tbody id="briefs-body">
+{% for b in briefs %}<tr data-brief-id="{{b.id}}"><td>{{b.date}}</td><td class="{{b.status}}">{{b.status}} ({{b.stopped_reason}})</td><td>{{b.steps}}</td>
 <td>{{b.tokens_in}}/{{b.tokens_out}}</td><td><a href="/briefs/{{b.id}}">查看 + trace</a></td></tr>
-{% else %}<tr><td colspan="5">暂无</td></tr>{% endfor %}</table>{% endblock %}
+{% else %}<tr data-empty="true"><td colspan="5">暂无</td></tr>{% endfor %}</tbody></table>
+<script defer src="{{url_for('static', path='/user_status.js')}}"></script>{% endblock %}

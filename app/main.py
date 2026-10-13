@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import markdown
 import nh3
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import config, scheduler
@@ -42,6 +43,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="AI News Agent", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 
 
 def _split(s: str) -> list[str]:
@@ -74,8 +76,29 @@ def user_page(request: Request, uid: int):
         briefs = s.query(Brief).filter_by(user_id=uid).order_by(Brief.id.desc()).all()
         runs = s.query(Run).filter_by(user_id=uid).order_by(Run.id.desc()).limit(10).all()
     job = scheduler.scheduler.get_job(f"user_{uid}")
+    requested_run = request.query_params.get("run", "")
     return templates.TemplateResponse(request, "user.html", {"u": u, "briefs": briefs, "runs": runs,
-                                      "next_run": job.next_run_time if job else None, "msg": request.query_params.get("msg")})
+                                      "next_run": job.next_run_time if job else None, "msg": request.query_params.get("msg"),
+                                      "requested_run": requested_run if any(r.run_id == requested_run for r in runs) else ""})
+
+
+def _run_data(run: Run) -> dict:
+    return {"run_id": run.run_id, "user_id": run.user_id, "trigger": run.trigger, "status": run.status,
+            "error": run.error, "brief_id": run.brief_id,
+            "created_at": run.created_at.strftime("%m-%d %H:%M:%S")}
+
+
+@app.get("/users/{uid}/activity")
+def user_activity(uid: int):
+    """页面自动更新快照：仅该用户的最近运行和简报，不返回正文、路径或 trace。"""
+    with SessionLocal() as s:
+        s.get(User, uid) or _404()
+        runs = s.query(Run).filter_by(user_id=uid).order_by(Run.id.desc()).limit(10).all()
+        briefs = s.query(Brief).filter_by(user_id=uid).order_by(Brief.id.desc()).limit(20).all()
+        payload = {"runs": [_run_data(r) for r in runs], "briefs": [
+            {"id": b.id, "date": b.date, "status": b.status, "stopped_reason": b.stopped_reason,
+             "steps": b.steps, "tokens_in": b.tokens_in, "tokens_out": b.tokens_out} for b in briefs]}
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/users/{uid}/prefs")
@@ -99,11 +122,13 @@ def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords
 
 
 @app.post("/users/{uid}/run")
-def run_now(uid: int):
+def run_now(request: Request, uid: int):
     try:
         run = submit_run(uid, trigger="manual")
     except LookupError:
         raise HTTPException(404)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse(_run_data(run), headers={"Cache-Control": "no-store"})
     msg = "capacity" if run.status == "failed" and run.error.startswith("capacity") else "started"
     return RedirectResponse(f"/users/{uid}?msg={msg}&run={run.run_id}", status_code=303)
 
@@ -113,8 +138,7 @@ def run_status(run_id: str):
     """简单轮询接口：前端/脚本可查看 run 状态与失败原因。"""
     with SessionLocal() as s:
         r = s.query(Run).filter_by(run_id=run_id).first() or _404()
-        return {"run_id": r.run_id, "user_id": r.user_id, "trigger": r.trigger, "status": r.status,
-                "error": r.error, "brief_id": r.brief_id}
+        return _run_data(r)
 
 
 @app.get("/briefs/{bid}", response_class=HTMLResponse)
