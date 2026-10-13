@@ -1,12 +1,13 @@
 """新闻工具：web_search 聚合免费来源（HN Algolia / arXiv / RSS，可选 Tavily），fetch_url 抓正文。"""
+
 import html
 import ipaddress
 import re
 import socket
 import zlib
-from urllib.parse import urljoin, urlsplit
-from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from urllib.parse import urljoin, urlsplit
 
 import feedparser
 import httpx
@@ -39,12 +40,24 @@ def _fmt(dt: datetime | None, width: int = 10) -> str:
 
 def _hn(query: str, days: int) -> list[dict]:
     since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
-    r = httpx.get("https://hn.algolia.com/api/v1/search_by_date",
-                  params={"query": query, "tags": "story", "numericFilters": f"created_at_i>{since}", "hitsPerPage": 8},
-                  timeout=TIMEOUT, headers=UA)
+    r = httpx.get(
+        "https://hn.algolia.com/api/v1/search_by_date",
+        params={"query": query, "tags": "story", "numericFilters": f"created_at_i>{since}", "hitsPerPage": 8},
+        timeout=TIMEOUT,
+        headers=UA,
+    )
     r.raise_for_status()
-    return [{"source": "hackernews", "title": h.get("title"), "url": h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}",
-             "date": h.get("created_at", "")[:10], "points": h.get("points")} for h in r.json().get("hits", []) if h.get("title")]
+    return [
+        {
+            "source": "hackernews",
+            "title": h.get("title"),
+            "url": h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}",
+            "date": h.get("created_at", "")[:10],
+            "points": h.get("points"),
+        }
+        for h in r.json().get("hits", [])
+        if h.get("title")
+    ]
 
 
 ARXIV_API = "https://export.arxiv.org/api/query"
@@ -67,7 +80,9 @@ def _arxiv_get(params: dict):
 
 
 def _arxiv(query: str, days: int) -> list[dict]:
-    r = _arxiv_get({"search_query": f"all:{query}", "sortBy": "submittedDate", "sortOrder": "descending", "max_results": 5})
+    r = _arxiv_get(
+        {"search_query": f"all:{query}", "sortBy": "submittedDate", "sortOrder": "descending", "max_results": 5}
+    )
     feed = feedparser.parse(r.text)
     pats, cjk = query_terms(query)
     out = []
@@ -78,31 +93,83 @@ def _arxiv(query: str, days: int) -> list[dict]:
         summary = " ".join(e.get("summary", "").split())
         if (pats or cjk) and _score(title, summary, pats, cjk) <= 0:
             continue
-        out.append({"source": "arxiv", "title": title, "url": e.link, "date": _fmt(_entry_dt(e)),
-                    "summary": summary[:300]})
+        out.append(
+            {"source": "arxiv", "title": title, "url": e.link, "date": _fmt(_entry_dt(e)), "summary": summary[:300]}
+        )
     return out
 
 
 STOPWORDS = {
-    "the", "and", "for", "with", "news", "latest", "of", "in", "on", "to", "a", "an",
-    "top", "new", "first", "best", "how", "what", "why", "your", "from", "that", "this",
-    "are", "you", "our", "its", "into", "over", "after", "about", "more", "most", "will",
-    "just", "than", "then", "also", "been", "have", "has", "was", "were", "not", "but",
-    "can", "all", "who", "their", "they", "said", "says", "update", "updates", "here",
+    "the",
+    "and",
+    "for",
+    "with",
+    "news",
+    "latest",
+    "of",
+    "in",
+    "on",
+    "to",
+    "a",
+    "an",
+    "top",
+    "new",
+    "first",
+    "best",
+    "how",
+    "what",
+    "why",
+    "your",
+    "from",
+    "that",
+    "this",
+    "are",
+    "you",
+    "our",
+    "its",
+    "into",
+    "over",
+    "after",
+    "about",
+    "more",
+    "most",
+    "will",
+    "just",
+    "than",
+    "then",
+    "also",
+    "been",
+    "have",
+    "has",
+    "was",
+    "were",
+    "not",
+    "but",
+    "can",
+    "all",
+    "who",
+    "their",
+    "they",
+    "said",
+    "says",
+    "update",
+    "updates",
+    "here",
 }
 CJK_RE = re.compile(r"[\u3400-\u9fff]+")
 
 
 def query_terms(query: str) -> tuple[list[re.Pattern], list[str]]:
     """英文词按词边界匹配（避免 "ai" 命中 "said"）；中文连续串用本身及二元组做子串匹配。"""
-    ascii_terms = [w for w in re.findall(r"[a-z0-9][a-z0-9+.\-]*", query.lower())
-                   if w not in STOPWORDS and not w.isdigit()]
+    ascii_terms = [
+        w for w in re.findall(r"[a-z0-9][a-z0-9+.\-]*", query.lower()) if w not in STOPWORDS and not w.isdigit()
+    ]
     pats = [re.compile(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])") for w in ascii_terms]
     cjk = []
     for run in CJK_RE.findall(query):
         cjk.append(run)
         if len(run) > 2:
-            cjk += [run[i:i + 2] for i in range(len(run) - 1)]
+            cjk += [run[i : i + 2] for i in range(len(run) - 1)]
     return pats, list(dict.fromkeys(cjk))
 
 
@@ -144,18 +211,25 @@ def _rss(query: str, days: int, errors: list | None = None, notes: list | None =
     if scored:
         out = [i for _, i in sorted(scored, key=key, reverse=True)[:10]]
     else:
-        out = [dict(i, summary="unmatched: recent item, does not contain the query terms")
-               for _, i in sorted(recent, key=key, reverse=True)[:3]]
+        out = [
+            dict(i, summary="unmatched: recent item, does not contain the query terms")
+            for _, i in sorted(recent, key=key, reverse=True)[:3]
+        ]
         if notes is not None:
-            notes.append(f"rss: no items matched {query!r}; showing {len(out)} most recent unfiltered items flagged 'unmatched' (try English keywords)")
+            notes.append(
+                f"rss: no items matched {query!r}; showing {len(out)} most recent unfiltered items flagged 'unmatched' (try English keywords)"
+            )
     for i in out:
         i.pop("_dt", None)
     return out
 
 
 def _tavily(query: str, days: int) -> list[dict]:
-    r = httpx.post("https://api.tavily.com/search", timeout=TIMEOUT,
-                   json={"api_key": config.TAVILY_API_KEY, "query": query, "topic": "news", "days": days, "max_results": 8})
+    r = httpx.post(
+        "https://api.tavily.com/search",
+        timeout=TIMEOUT,
+        json={"api_key": config.TAVILY_API_KEY, "query": query, "topic": "news", "days": days, "max_results": 8},
+    )
     r.raise_for_status()
     out = []
     for x in r.json().get("results", []):
@@ -164,30 +238,46 @@ def _tavily(query: str, days: int) -> list[dict]:
         except (TypeError, ValueError):
             dt = None
         if _recent(dt, days):
-            out.append({"source": "tavily", "title": x["title"], "url": x["url"], "date": _fmt(dt),
-                        "summary": x.get("content", "")[:300]})
+            out.append(
+                {
+                    "source": "tavily",
+                    "title": x["title"],
+                    "url": x["url"],
+                    "date": _fmt(dt),
+                    "summary": x.get("content", "")[:300],
+                }
+            )
     return out
 
 
 class SearchResult(str):
     """带来源健康账本的搜索文本返回对象（继承 str，完全兼容字符串接口）。"""
-    def __new__(cls, text: str, requested: list[str] | None = None,
-                succeeded: list[str] | None = None,
-                failed: dict[str, str] | None = None,
-                results_count: int = 0):
+
+    def __new__(
+        cls,
+        text: str,
+        requested: list[str] | None = None,
+        succeeded: list[str] | None = None,
+        failed: dict[str, str] | None = None,
+        results_count: int = 0,
+    ):
         obj = super().__new__(cls, text)
         obj.sources_requested = requested or []
         obj.sources_succeeded = succeeded or []
         obj.sources_failed = failed or {}
         obj.results_count = results_count
-        obj.all_failed = (len(obj.sources_succeeded) == 0 and len(obj.sources_failed) > 0)
+        obj.all_failed = len(obj.sources_succeeded) == 0 and len(obj.sources_failed) > 0
         return obj
 
 
 def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> SearchResult:
     sources = sources or (["tavily"] if config.TAVILY_API_KEY else ["hackernews", "rss", "arxiv"])
-    fns = {"hackernews": lambda: _hn(query, days), "arxiv": lambda: _arxiv(query, days), "rss": lambda: _rss(query, days),
-           "tavily": lambda: _tavily(query, days)}
+    fns = {
+        "hackernews": lambda: _hn(query, days),
+        "arxiv": lambda: _arxiv(query, days),
+        "rss": lambda: _rss(query, days),
+        "tavily": lambda: _tavily(query, days),
+    }
     results, errors, notes = [], [], []
     succeeded, failed = [], {}
     fns["rss"] = lambda: _rss(query, days, errors, notes)
@@ -222,8 +312,11 @@ def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> S
             msg = f"{type(e).__name__}: {e}"
             errors.append(f"{s}: {msg}")
             failed[s] = msg
-    lines = [f"- [{x['source']}] {x['title']} | {x['url']} | {x.get('date','')}" + (f" | {x['summary']}" if x.get("summary") else "")
-             for x in results]
+    lines = [
+        f"- [{x['source']}] {x['title']} | {x['url']} | {x.get('date', '')}"
+        + (f" | {x['summary']}" if x.get("summary") else "")
+        for x in results
+    ]
     if notes:
         lines.append("notes: " + "; ".join(notes))
     if errors:
@@ -269,7 +362,7 @@ def _decode_body(raw: bytes, encoding: str) -> bytes:
     截断的压缩流尽量解出已有部分；编码错标（声明 gzip 实为明文）或未知编码时退回原始字节。"""
     enc = encoding.lower().strip()
     if enc in ("gzip", "x-gzip", "deflate"):
-        for wbits in ((31,) if "gzip" in enc else (15, -15)):
+        for wbits in (31,) if "gzip" in enc else (15, -15):
             try:
                 d = zlib.decompressobj(wbits)
                 return d.decompress(raw, MAX_FETCH_BYTES)
@@ -282,7 +375,9 @@ def _extract_pdf_text(raw: bytes, max_chars: int = 4000) -> str:
     """从二进制 PDF 字节流中提取文本，限制解析前 10 页，防止超大文档或恶意构造挂起。"""
     try:
         import io
+
         from pypdf import PdfReader
+
         reader = PdfReader(io.BytesIO(raw))
         pages_text = []
         chars_collected = 0

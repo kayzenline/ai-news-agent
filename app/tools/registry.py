@@ -1,4 +1,5 @@
 """工具注册表：JSON Schema（给模型看）+ 分发执行（错误转成字符串回传给模型）。"""
+
 import json
 from typing import Callable
 
@@ -8,28 +9,64 @@ from .sandbox import Sandbox
 
 
 def _fn(name, desc, props, required):
-    return {"type": "function", "function": {"name": name, "description": desc,
-            "parameters": {"type": "object", "properties": props, "required": required}}}
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {"type": "object", "properties": props, "required": required},
+        },
+    }
+
 
 S = {"type": "string"}
 TOOL_SCHEMAS = [
     _fn("list_dir", "List files in a directory of the user workspace (relative path).", {"path": S}, ["path"]),
     _fn("read_file", "Read a UTF-8 text file in the user workspace.", {"path": S}, ["path"]),
-    _fn("search_content", "Case-insensitive keyword search across files under dir. Use it to check whether a story/url already appeared in previous briefs.",
-        {"keyword": S, "dir": S}, ["keyword", "dir"]),
-    _fn("write_file", "Create or overwrite a text file in the user workspace.", {"path": S, "content": S}, ["path", "content"]),
-    _fn("bash", "Run ONE restricted read-only shell command inside the workspace (allowed: ls cat head tail wc grep find date echo mkdir, each with a small option allowlist; no pipes/redirects/long options). Globs (* ? [...]) in file operands of ls/cat/head/tail/wc/grep are expanded inside the workspace, e.g. `ls briefs/2026-10-12/*.md`. 10s timeout.",
-        {"command": S}, ["command"]),
-    _fn("web_search", "Search recent AI news. Sources: hackernews, rss (TechCrunch/VentureBeat/MIT TR/HF blog), arxiv, tavily (if configured). Returns one line per result: `- ev_NNN [source] title | url | date`; cite results by their evidence id.",
-        {"query": S, "sources": {"type": "array", "items": {"type": "string", "enum": ["hackernews", "rss", "arxiv", "tavily"]}},
-         "days": {"type": "integer", "description": "look-back window in days (applies to all sources), default 2; items with unknown publish date are kept and marked date=unknown"}}, ["query"]),
-    _fn("fetch_url", "Fetch a public web page and return its plain text (truncated), prefixed with the evidence_id assigned to this page.", {"url": S}, ["url"]),
+    _fn(
+        "search_content",
+        "Case-insensitive keyword search across files under dir. Use it to check whether a story/url already appeared in previous briefs.",
+        {"keyword": S, "dir": S},
+        ["keyword", "dir"],
+    ),
+    _fn(
+        "write_file",
+        "Create or overwrite a text file in the user workspace.",
+        {"path": S, "content": S},
+        ["path", "content"],
+    ),
+    _fn(
+        "bash",
+        "Run ONE restricted read-only shell command inside the workspace (allowed: ls cat head tail wc grep find date echo mkdir, each with a small option allowlist; no pipes/redirects/long options). Globs (* ? [...]) in file operands of ls/cat/head/tail/wc/grep are expanded inside the workspace, e.g. `ls briefs/2026-10-12/*.md`. 10s timeout.",
+        {"command": S},
+        ["command"],
+    ),
+    _fn(
+        "web_search",
+        "Search recent AI news. Sources: hackernews, rss (TechCrunch/VentureBeat/MIT TR/HF blog), arxiv, tavily (if configured). Returns one line per result: `- ev_NNN [source] title | url | date`; cite results by their evidence id.",
+        {
+            "query": S,
+            "sources": {"type": "array", "items": {"type": "string", "enum": ["hackernews", "rss", "arxiv", "tavily"]}},
+            "days": {
+                "type": "integer",
+                "description": "look-back window in days (applies to all sources), default 2; items with unknown publish date are kept and marked date=unknown",
+            },
+        },
+        ["query"],
+    ),
+    _fn(
+        "fetch_url",
+        "Fetch a public web page and return its plain text (truncated), prefixed with the evidence_id assigned to this page.",
+        {"url": S},
+        ["url"],
+    ),
 ]
 
 
 def _without_tavily(schema: dict) -> dict:
     """未配置 TAVILY_API_KEY 时不向模型宣传 tavily。"""
     import copy
+
     s = copy.deepcopy(schema)
     f = s["function"]
     f["description"] = f["description"].replace(", tavily (if configured)", "")
@@ -54,8 +91,11 @@ class ToolRegistry:
             self.impl.update(extra)
 
     def schemas(self):
-        return [_without_tavily(s) if s["function"]["name"] == "web_search" and not config.TAVILY_API_KEY else s
-                for s in TOOL_SCHEMAS if s["function"]["name"] in self.impl]
+        return [
+            _without_tavily(s) if s["function"]["name"] == "web_search" and not config.TAVILY_API_KEY else s
+            for s in TOOL_SCHEMAS
+            if s["function"]["name"] in self.impl
+        ]
 
     def call(self, name: str, raw_args: str) -> tuple[bool, str]:
         """返回 (ok, output)。任何异常都不会抛出循环，而是作为文本反馈给模型让它自我纠正。"""
@@ -79,6 +119,7 @@ class ToolRegistry:
             return False, f"ERROR: {type(e).__name__}: {e}"
         if name == "web_search":
             from .news_tools import SearchResult
+
             if isinstance(raw_out, SearchResult):
                 all_failed = raw_out.all_failed
                 requested = raw_out.sources_requested
@@ -89,15 +130,19 @@ class ToolRegistry:
                 lines = [l.strip() for l in out.splitlines() if l.strip()]
                 results_count = sum(1 for l in lines if l.startswith("- ") and " | " in l)
                 has_errors = any(l.startswith("errors:") for l in lines) or out.startswith("errors:")
-                all_failed = (results_count == 0 and has_errors)
+                all_failed = results_count == 0 and has_errors
                 requested = args.get("sources") or ["hackernews", "rss", "arxiv"]
                 succeeded = [s for s in requested] if (results_count > 0 or not has_errors) else []
                 failed = {"all": out} if all_failed else {}
 
             if self.evidence is not None:
                 self.evidence.record_search(
-                    str(args.get("query", "")), requested=requested, succeeded=succeeded,
-                    failed=failed, items_count=results_count, all_failed=all_failed
+                    str(args.get("query", "")),
+                    requested=requested,
+                    succeeded=succeeded,
+                    failed=failed,
+                    items_count=results_count,
+                    all_failed=all_failed,
                 )
             if all_failed:
                 return False, f"ERROR: all search sources failed ({out})"

@@ -1,4 +1,5 @@
 """五个基础工具：list_dir / read_file / search_content / write_file / bash。"""
+
 import glob
 import shlex
 import subprocess
@@ -6,6 +7,7 @@ import subprocess
 from .sandbox import Sandbox, SandboxError
 
 MAX_READ = 20_000
+
 
 def list_dir(sb: Sandbox, path: str = ".") -> str:
     d = sb.resolve(path)
@@ -68,22 +70,35 @@ def write_file(sb: Sandbox, path: str, content: str) -> str:
 # spec: flags=允许的无参短选项字母; value=带参短选项 -> 参数类型("num"/"text");
 #       operands="path"(全部按路径做沙箱检查) / "text"(不是路径) / "date"(只能是 +FORMAT)
 BASH_SPECS = {
-    "ls":    {"flags": "lahR1trSFd", "value": {}, "operands": "path"},
-    "cat":   {"flags": "nbsAE", "value": {}, "operands": "path"},
-    "head":  {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
-    "tail":  {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
-    "wc":    {"flags": "lwcm", "value": {}, "operands": "path"},
-    "grep":  {"flags": "inrvcHhlLwxFEoqs", "value": {"e": "text", "m": "num", "A": "num", "B": "num", "C": "num"},
-              "operands": "grep"},
-    "find":  {"operands": "find"},
-    "date":  {"flags": "uR", "value": {}, "operands": "date"},
-    "echo":  {"flags": "neE", "value": {}, "operands": "text"},
+    "ls": {"flags": "lahR1trSFd", "value": {}, "operands": "path"},
+    "cat": {"flags": "nbsAE", "value": {}, "operands": "path"},
+    "head": {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
+    "tail": {"flags": "qv", "value": {"n": "num", "c": "num"}, "operands": "path"},
+    "wc": {"flags": "lwcm", "value": {}, "operands": "path"},
+    "grep": {
+        "flags": "inrvcHhlLwxFEoqs",
+        "value": {"e": "text", "m": "num", "A": "num", "B": "num", "C": "num"},
+        "operands": "grep",
+    },
+    "find": {"operands": "find"},
+    "date": {"flags": "uR", "value": {}, "operands": "date"},
+    "echo": {"flags": "neE", "value": {}, "operands": "text"},
     "mkdir": {"flags": "pv", "value": {}, "operands": "path"},
 }
 ALLOWED_CMDS = set(BASH_SPECS)
-FIND_TESTS = {"-name": "text", "-iname": "text", "-path": "text", "-ipath": "text", "-type": "text",
-              "-maxdepth": "num", "-mindepth": "num", "-mtime": "text", "-mmin": "text", "-size": "text",
-              "-newer": "path"}
+FIND_TESTS = {
+    "-name": "text",
+    "-iname": "text",
+    "-path": "text",
+    "-ipath": "text",
+    "-type": "text",
+    "-maxdepth": "num",
+    "-mindepth": "num",
+    "-mtime": "text",
+    "-mmin": "text",
+    "-size": "text",
+    "-newer": "path",
+}
 FIND_FLAGS = {"-print", "-empty", "-not", "!", "-o", "-a", "-or", "-and", "(", ")"}
 FORBIDDEN_TOKENS = [";", "&&", "||", "|", "`", "$(", ">", "<", "\n"]
 BASH_TIMEOUT = 10
@@ -149,7 +164,7 @@ def _validate(sb: Sandbox, argv: list[str]):
         while j < len(a):
             ch = a[j]
             if ch in spec["value"]:
-                v = a[j + 1:]
+                v = a[j + 1 :]
                 if not v:
                     if i >= len(args):
                         raise SandboxError(f"option -{ch} needs a value")
@@ -159,8 +174,10 @@ def _validate(sb: Sandbox, argv: list[str]):
                     need_pattern = False
                 break
             if ch not in spec["flags"]:
-                raise SandboxError(f"option -{ch} not allowed for {cmd}; allowed flags: {spec['flags']} "
-                                   f"value options: {sorted(spec['value'])}")
+                raise SandboxError(
+                    f"option -{ch} not allowed for {cmd}; allowed flags: {spec['flags']} "
+                    f"value options: {sorted(spec['value'])}"
+                )
             j += 1
     kind = spec["operands"]
     if kind == "grep":
@@ -187,22 +204,33 @@ def expand_globs(sb: Sandbox, argv: list[str]) -> list[str]:
     cmd = argv[0]
     if cmd not in GLOB_CMDS:
         return argv
-    out, need_pattern = [cmd], cmd == "grep" and not any(a == "-e" or (a.startswith("-e") and len(a) > 2) for a in argv[1:])
+    out, need_pattern = (
+        [cmd],
+        cmd == "grep" and not any(a == "-e" or (a.startswith("-e") and len(a) > 2) for a in argv[1:]),
+    )
     value_opts = set(BASH_SPECS[cmd]["value"])
     skip_next = end_opts = False
     for a in argv[1:]:
         if skip_next:
-            out.append(a); skip_next = False; continue
+            out.append(a)
+            skip_next = False
+            continue
         if not end_opts and a == "--":
-            end_opts = True; out.append(a); continue
+            end_opts = True
+            out.append(a)
+            continue
         if not end_opts and a.startswith("-") and a != "-":
             if a[-1] in value_opts and len(a) == 2:
                 skip_next = True
-            out.append(a); continue
+            out.append(a)
+            continue
         if need_pattern:
-            need_pattern = False; out.append(a); continue
+            need_pattern = False
+            out.append(a)
+            continue
         if not GLOB_CHARS & set(a):
-            out.append(a); continue
+            out.append(a)
+            continue
         _check_path(sb, a.split("*")[0].split("?")[0].split("[")[0] or ".")  # 拒绝绝对路径、~、..逃逸的前缀
         matches = sorted(glob.glob(a, root_dir=sb.root))
         if not matches:
@@ -225,9 +253,15 @@ def bash(sb: Sandbox, command: str) -> str:
     argv = expand_globs(sb, argv)
     _validate(sb, argv)  # 展开后的每个路径仍逐个做沙箱检查
     try:
-        r = subprocess.run(argv, cwd=sb.root, capture_output=True, text=True,
-                           timeout=BASH_TIMEOUT, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+        r = subprocess.run(
+            argv,
+            cwd=sb.root,
+            capture_output=True,
+            text=True,
+            timeout=BASH_TIMEOUT,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"command timed out after {BASH_TIMEOUT}s")
-    out = (r.stdout + (("\n[stderr]\n" + r.stderr) if r.stderr else ""))
+    out = r.stdout + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
     return f"[exit {r.returncode}]\n{out}"

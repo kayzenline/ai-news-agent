@@ -6,6 +6,7 @@
   tool 消息带 tool_call_id
 各 adapter 负责与具体 API 互转，Agent 循环只认 LLMResponse。
 """
+
 from dataclasses import dataclass, field
 
 

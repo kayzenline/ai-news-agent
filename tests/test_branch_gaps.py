@@ -1,4 +1,5 @@
 """补齐覆盖率报告里还没走到的分支。只断言这些分支的对外行为。"""
+
 import json
 import socket
 import subprocess
@@ -28,8 +29,7 @@ def test_draft_shape_and_field_limits():
     s = store()
     assert "JSON object" in validate_draft("[]", s)[1][0]
     assert "note must be a string" in " ".join(validate_draft(draft(note=1), s)[1])
-    assert "items must be a list" in " ".join(validate_draft(
-        json.dumps({"schema_version": 1, "items": {}}), s)[1])
+    assert "items must be a list" in " ".join(validate_draft(json.dumps({"schema_version": 1, "items": {}}), s)[1])
     assert "must be an object" in " ".join(validate_draft(draft("nope"), s)[1])
     assert "too long" in " ".join(validate_draft(draft(item(title="x" * 201)), s)[1])
     assert "change_type must be" in " ".join(validate_draft(draft(item(change_type="nope")), s)[1])
@@ -64,7 +64,9 @@ def test_demo_script_drops_items_after_failed_validation():
         ("write_file", "wrote 1 chars"),
     ]
     for i, (name, content) in enumerate(steps):
-        msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": str(i), "name": name, "arguments": "{}"}]})
+        msgs.append(
+            {"role": "assistant", "content": "", "tool_calls": [{"id": str(i), "name": name, "arguments": "{}"}]}
+        )
         msgs.append({"role": "tool", "tool_call_id": str(i), "content": content})
     msgs.append({"role": "user", "content": "draft failed validation: items[1].title"})
     call = demo_script(msgs).tool_calls[0]
@@ -74,6 +76,7 @@ def test_demo_script_drops_items_after_failed_validation():
 
 def test_missing_dotenv_is_ignored(tmp_path):
     from app.config import _load_dotenv
+
     _load_dotenv(str(tmp_path / "no-such.env"))
 
 
@@ -107,15 +110,22 @@ def test_check_reports_provider_setup_timeout_and_bad_arguments(monkeypatch, cap
     output = capsys.readouterr().out
     assert "网络连接或响应解析异常" in output and "secret-body" not in output
 
-    monkeypatch.setattr(check, "get_provider", lambda: SimpleNamespace(
-        client=client, chat=lambda *a: LLMResponse("", [ToolCall("c", "configuration_check", "{")], "tool_use")))
+    monkeypatch.setattr(
+        check,
+        "get_provider",
+        lambda: SimpleNamespace(
+            client=client, chat=lambda *a: LLMResponse("", [ToolCall("c", "configuration_check", "{")], "tool_use")
+        ),
+    )
     assert check.main() == 1 and "未返回预期工具调用" in capsys.readouterr().out
 
 
 def test_check_module_exits_with_main_status(monkeypatch, capsys):
     import runpy
     import warnings
+
     from app import config
+
     monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
@@ -133,19 +143,25 @@ def test_claude_chat_and_unknown_provider(monkeypatch):
     def create(**kw):
         created["kw"] = kw
         usage = SimpleNamespace(input_tokens=2, output_tokens=3)
-        return SimpleNamespace(content=[
-            SimpleNamespace(type="text", text="ok"),
-            SimpleNamespace(type="tool_use", id="t1", name="list_dir", input={"path": "."}),
-        ], stop_reason="tool_use", usage=usage)
+        return SimpleNamespace(
+            content=[
+                SimpleNamespace(type="text", text="ok"),
+                SimpleNamespace(type="tool_use", id="t1", name="list_dir", input={"path": "."}),
+            ],
+            stop_reason="tool_use",
+            usage=usage,
+        )
 
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
     monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=lambda **kw: client))
     monkeypatch.setattr(config, "LLM_PROVIDER", "claude")
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(config, "LLM_MODEL", "claude-test")
-    system, msgs = ClaudeProvider.to_api_messages([
-        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "name": "bash", "arguments": "{"}]},
-    ])
+    system, msgs = ClaudeProvider.to_api_messages(
+        [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "name": "bash", "arguments": "{"}]},
+        ]
+    )
     assert system == "" and msgs[0]["content"][0]["input"] == {}
     provider = get_provider()
     response = provider.chat(
@@ -180,11 +196,13 @@ def test_lifespan_does_not_shut_down_a_stopped_scheduler(monkeypatch):
             return "up"
 
     import asyncio
+
     assert asyncio.run(enter()) == "up"
 
 
 def test_existing_email_run_without_prefs_and_delivery_retry(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
+
     from app import config, db, main
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
@@ -194,8 +212,15 @@ def test_existing_email_run_without_prefs_and_delivery_retry(tmp_path, monkeypat
 
     def submit(uid, trigger="manual"):
         seen["uid"] = uid
-        return SimpleNamespace(run_id="r1", status="queued", error="", user_id=uid, trigger=trigger,
-                               brief_id=None, created_at=datetime(2026, 10, 13, 1, 2, 3))
+        return SimpleNamespace(
+            run_id="r1",
+            status="queued",
+            error="",
+            user_id=uid,
+            trigger=trigger,
+            brief_id=None,
+            created_at=datetime(2026, 10, 13, 1, 2, 3),
+        )
 
     monkeypatch.setattr(main, "submit_run", submit)
     with TestClient(main.app) as client:
@@ -226,9 +251,15 @@ def test_existing_email_run_without_prefs_and_delivery_retry(tmp_path, monkeypat
 def test_blank_name_is_left_unchanged():
     from app.db import User
     from app.main import _update_user_prefs
+
     user = User(name="Keep", email="k@x.com", topics=[], keywords=[])
     _update_user_prefs(user, None, "AI", "llm", "en", "09:30", False, "Australia/Sydney")
-    assert user.name == "Keep" and user.topics == ["AI"] and user.email_enabled == 0 and user.timezone == "Australia/Sydney"
+    assert (
+        user.name == "Keep"
+        and user.topics == ["AI"]
+        and user.email_enabled == 0
+        and user.timezone == "Australia/Sydney"
+    )
 
 
 def test_scheduler_fallbacks(tmp_path, monkeypatch):
@@ -389,12 +420,14 @@ def test_filesystem_edge_branches(tmp_path, monkeypatch):
 
 def test_news_source_and_fetch_branches(monkeypatch):
     import httpx
+
     from app import config
     from app.tools import news_tools as N
 
     def redirect(url, **kwargs):
-        return httpx.Response(301, headers={"location": "https://arxiv.org/api/query?x=1"},
-                              request=httpx.Request("GET", url))
+        return httpx.Response(
+            301, headers={"location": "https://arxiv.org/api/query?x=1"}, request=httpx.Request("GET", url)
+        )
 
     monkeypatch.setattr(N.httpx, "get", redirect)
     with pytest.raises(ValueError, match="too many redirects"):
@@ -410,9 +443,15 @@ def test_news_source_and_fetch_branches(monkeypatch):
     monkeypatch.setattr(config, "TAVILY_API_KEY", "k")
 
     def post(url, **kwargs):
-        return httpx.Response(200, json={"results": [
-            {"title": "T", "url": "https://ex.com/t", "published_date": "not-a-date", "content": "c"},
-        ]}, request=httpx.Request("POST", url))
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"title": "T", "url": "https://ex.com/t", "published_date": "not-a-date", "content": "c"},
+                ]
+            },
+            request=httpx.Request("POST", url),
+        )
 
     monkeypatch.setattr(N.httpx, "post", post)
     assert "https://ex.com/t" in N._tavily("x", 5)[0]["url"]
@@ -444,6 +483,7 @@ def test_news_source_and_fetch_branches(monkeypatch):
 def test_pdf_text_and_redirect_limit(monkeypatch):
     import httpx
     import pypdf
+
     from app.tools import news_tools as N
 
     class Page:
@@ -474,8 +514,13 @@ def test_pdf_text_and_redirect_limit(monkeypatch):
 
     monkeypatch.setattr(N, "check_public_url", lambda url: None)
     monkeypatch.setattr(N, "_extract_pdf_text", lambda raw, max_chars=4000: "from pdf")
-    pdf = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(
-        200, headers={"content-type": "application/pdf"}, stream=httpx.ByteStream(b"%PDF-1.4"))))
+    pdf = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, headers={"content-type": "application/pdf"}, stream=httpx.ByteStream(b"%PDF-1.4")
+            )
+        )
+    )
     monkeypatch.setattr(httpx, "stream", lambda method, url, **kw: pdf.stream(method, url, follow_redirects=False))
     assert N.fetch_url("https://ex.com/paper") == "from pdf"
 

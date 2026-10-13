@@ -1,7 +1,8 @@
 """FastAPI + Jinja2 前端：身份、订阅偏好、历史简报、Agent trace、立即运行。"""
+
 import json
-import re
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,14 +22,45 @@ logging.basicConfig(level=logging.INFO)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 # 简报 Markdown 来自模型/新闻源/用户昵称，均不可信：转 HTML 后用严格白名单清理再 |safe 渲染
-SAFE_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr", "ul", "ol", "li", "strong", "em", "b", "i",
-             "code", "pre", "blockquote", "a", "table", "thead", "tbody", "tr", "th", "td"}
+SAFE_TAGS = {
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "br",
+    "hr",
+    "ul",
+    "ol",
+    "li",
+    "strong",
+    "em",
+    "b",
+    "i",
+    "code",
+    "pre",
+    "blockquote",
+    "a",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+}
 
 
 def render_markdown(md: str) -> str:
     html = markdown.markdown(md)
-    return nh3.clean(html, tags=SAFE_TAGS, attributes={"a": {"href", "title"}},
-                     url_schemes={"http", "https", "mailto"}, link_rel="noopener noreferrer nofollow")
+    return nh3.clean(
+        html,
+        tags=SAFE_TAGS,
+        attributes={"a": {"href", "title"}},
+        url_schemes={"http", "https", "mailto"},
+        link_rel="noopener noreferrer nofollow",
+    )
 
 
 @asynccontextmanager
@@ -54,12 +86,16 @@ def _split(s: str) -> list[str]:
 def index(request: Request):
     with SessionLocal() as s:
         users = s.query(User).order_by(User.id).all()
-    return templates.TemplateResponse(request, "index.html", {
-        "users": users,
-        "provider": config.LLM_PROVIDER,
-        "error": request.query_params.get("error"),
-        "error_email": request.query_params.get("email", ""),
-    })
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "users": users,
+            "provider": config.LLM_PROVIDER,
+            "error": request.query_params.get("error"),
+            "error_email": request.query_params.get("email", ""),
+        },
+    )
 
 
 @app.post("/users")
@@ -72,6 +108,7 @@ def create_user(name: str = Form(...), email: str = Form(...)):
         if u:
             if u.name != name:
                 from urllib.parse import quote
+
                 return RedirectResponse(f"/?error=name_mismatch&email={quote(email)}", status_code=303)
             return RedirectResponse(f"/users/{u.id}", status_code=303)
         u = User(name=name, email=email, topics=["大模型", "AI Agent"], keywords=["LLM", "agent"])
@@ -89,16 +126,31 @@ def user_page(request: Request, uid: int):
         runs = s.query(Run).filter_by(user_id=uid).order_by(Run.id.desc()).limit(10).all()
     job = scheduler.scheduler.get_job(f"user_{uid}")
     requested_run = request.query_params.get("run", "")
-    return templates.TemplateResponse(request, "user.html", {"u": u, "briefs": briefs, "runs": runs,
-                                      "max_steps": config.MAX_STEPS,
-                                      "next_run": job.next_run_time if job else None, "msg": request.query_params.get("msg"),
-                                      "requested_run": requested_run if any(r.run_id == requested_run for r in runs) else ""})
+    return templates.TemplateResponse(
+        request,
+        "user.html",
+        {
+            "u": u,
+            "briefs": briefs,
+            "runs": runs,
+            "max_steps": config.MAX_STEPS,
+            "next_run": job.next_run_time if job else None,
+            "msg": request.query_params.get("msg"),
+            "requested_run": requested_run if any(r.run_id == requested_run for r in runs) else "",
+        },
+    )
 
 
 def _run_data(run: Run) -> dict:
-    return {"run_id": run.run_id, "user_id": run.user_id, "trigger": run.trigger, "status": run.status,
-            "error": run.error, "brief_id": run.brief_id,
-            "created_at": run.created_at.strftime("%m-%d %H:%M:%S")}
+    return {
+        "run_id": run.run_id,
+        "user_id": run.user_id,
+        "trigger": run.trigger,
+        "status": run.status,
+        "error": run.error,
+        "brief_id": run.brief_id,
+        "created_at": run.created_at.strftime("%m-%d %H:%M:%S"),
+    }
 
 
 @app.get("/users/{uid}/activity")
@@ -108,14 +160,34 @@ def user_activity(uid: int):
         s.get(User, uid) or _404()
         runs = s.query(Run).filter_by(user_id=uid).order_by(Run.id.desc()).limit(10).all()
         briefs = s.query(Brief).filter_by(user_id=uid).order_by(Brief.id.desc()).limit(20).all()
-        payload = {"runs": [_run_data(r) for r in runs], "briefs": [
-            {"id": b.id, "date": b.date, "status": b.status, "stopped_reason": b.stopped_reason,
-             "steps": b.steps, "tokens_in": b.tokens_in, "tokens_out": b.tokens_out} for b in briefs]}
+        payload = {
+            "runs": [_run_data(r) for r in runs],
+            "briefs": [
+                {
+                    "id": b.id,
+                    "date": b.date,
+                    "status": b.status,
+                    "stopped_reason": b.stopped_reason,
+                    "steps": b.steps,
+                    "tokens_in": b.tokens_in,
+                    "tokens_out": b.tokens_out,
+                }
+                for b in briefs
+            ],
+        }
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
-def _update_user_prefs(u: User, name: str | None, topics: str, keywords: str, language: str,
-                       send_time: str, email_enabled: bool, timezone: str):
+def _update_user_prefs(
+    u: User,
+    name: str | None,
+    topics: str,
+    keywords: str,
+    language: str,
+    send_time: str,
+    email_enabled: bool,
+    timezone: str,
+):
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", send_time or ""):
         raise HTTPException(422, "send_time must be HH:MM (00:00-23:59)")
     timezone = timezone.strip() or config.DEFAULT_TIMEZONE
@@ -130,9 +202,16 @@ def _update_user_prefs(u: User, name: str | None, topics: str, keywords: str, la
 
 
 @app.post("/users/{uid}/prefs")
-def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords: str = Form(""),
-               language: str = Form("zh"), send_time: str = Form("08:00"), email_enabled: str = Form(None),
-               timezone: str = Form("")):
+def save_prefs(
+    uid: int,
+    name: str = Form(...),
+    topics: str = Form(""),
+    keywords: str = Form(""),
+    language: str = Form("zh"),
+    send_time: str = Form("08:00"),
+    email_enabled: str = Form(None),
+    timezone: str = Form(""),
+):
     with SessionLocal() as s:
         u = s.get(User, uid) or _404()
         _update_user_prefs(u, name, topics, keywords, language, send_time, bool(email_enabled), timezone)
@@ -157,7 +236,7 @@ async def run_now(request: Request, uid: int):
                     language=form.get("language", u.language or "zh"),
                     send_time=form.get("send_time", u.send_time or "08:00"),
                     email_enabled=bool(form.get("email_enabled")),
-                    timezone=form.get("timezone", u.timezone or "")
+                    timezone=form.get("timezone", u.timezone or ""),
                 )
                 s.commit()
                 scheduler.schedule_user(u)
@@ -186,9 +265,11 @@ def brief_page(request: Request, bid: int):
         deliveries = s.query(Delivery).filter_by(brief_id=bid).all()
     p = Path(b.path)
     md = p.read_text(encoding="utf-8") if p.exists() else "_（简报文件不存在，见 trace）_"
-    return templates.TemplateResponse(request, "brief.html", {"b": b, "html": render_markdown(md),
-                                      "trace": json.loads(b.trace_json or "[]"),
-                                      "deliveries": deliveries})
+    return templates.TemplateResponse(
+        request,
+        "brief.html",
+        {"b": b, "html": render_markdown(md), "trace": json.loads(b.trace_json or "[]"), "deliveries": deliveries},
+    )
 
 
 @app.post("/deliveries/{did}/retry")

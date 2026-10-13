@@ -1,7 +1,8 @@
 import json
+
 from app.agent import Agent
 from app.llm.base import LLMResponse, ToolCall
-from app.llm.providers import FakeProvider, ClaudeProvider, OpenAICompatProvider
+from app.llm.providers import ClaudeProvider, FakeProvider, OpenAICompatProvider
 from app.tools.registry import ToolRegistry
 from app.tools.sandbox import Sandbox
 
@@ -17,15 +18,19 @@ def make(tmp_path, script, max_steps=10):
     (sb.root / "profile.json").write_text('{"name":"Edison","topics":["LLM"]}')
     fake_search = lambda query, **k: "- [hn] Old | https://ex.com/old\n- [hn] New | https://ex.com/new"
     from app.evidence import EvidenceStore
+
     reg = ToolRegistry(sb, extra={"web_search": fake_search}, evidence=EvidenceStore())
     return sb, Agent(FakeProvider(script), reg, max_steps=max_steps)
 
 
 def test_scripted_run_writes_brief_and_traces(tmp_path):
-    script = [tc(1, "read_file", path="profile.json"), tc(2, "web_search", query="LLM"),
-              tc(3, "search_content", keyword="https://ex.com/old", dir="briefs"),
-              tc(4, "write_file", path="briefs/2026-10-11.md", content="# brief\n- New https://ex.com/new"),
-              LLMResponse("done", [], "end")]
+    script = [
+        tc(1, "read_file", path="profile.json"),
+        tc(2, "web_search", query="LLM"),
+        tc(3, "search_content", keyword="https://ex.com/old", dir="briefs"),
+        tc(4, "write_file", path="briefs/2026-10-11.md", content="# brief\n- New https://ex.com/new"),
+        LLMResponse("done", [], "end"),
+    ]
     sb, agent = make(tmp_path, script)
     r = agent.run("go", today="2026-10-11")
     assert r.stopped_reason == "model_finished" and r.steps == 5
@@ -37,11 +42,13 @@ def test_scripted_run_writes_brief_and_traces(tmp_path):
 
 def test_tool_error_is_fed_back(tmp_path):
     seen = []
+
     def model(msgs):
         seen.append(msgs[-1])
         if len(seen) == 1:
             return tc(1, "read_file", path="../../etc/passwd")
         return LLMResponse("ok", [], "end")
+
     _, agent = make(tmp_path, model)
     r = agent.run("go")
     assert seen[1]["role"] == "tool" and seen[1]["content"].startswith("ERROR")
@@ -62,7 +69,9 @@ def test_repeated_identical_call_blocked(tmp_path):
 
 
 def test_llm_exception_stops_cleanly(tmp_path):
-    def boom(m): raise RuntimeError("503")
+    def boom(m):
+        raise RuntimeError("503")
+
     _, agent = make(tmp_path, boom)
     r = agent.run("go")
     assert r.stopped_reason == "llm_error"
@@ -70,6 +79,7 @@ def test_llm_exception_stops_cleanly(tmp_path):
 
 def test_demo_fake_model_end_to_end(tmp_path):
     from app.llm.demo import demo_script
+
     _, agent = make(tmp_path, demo_script)
     r = agent.run("go", today="2026-10-11", output="staging/x/draft.json")
     assert r.stopped_reason == "model_finished"
@@ -77,11 +87,20 @@ def test_demo_fake_model_end_to_end(tmp_path):
     assert [it["evidence_ids"] for it in draft["items"]] == [["ev_002"]]  # ev_001 是旧故事，去重生效
 
 
-HIST = [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"},
-        {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "name": "list_dir", "arguments": '{"path":"."}'},
-                                                            {"id": "b", "name": "read_file", "arguments": '{"path":"x"}'}]},
-        {"role": "tool", "tool_call_id": "a", "content": "[F] x"},
-        {"role": "tool", "tool_call_id": "b", "content": "ERROR: nope"}]
+HIST = [
+    {"role": "system", "content": "sys"},
+    {"role": "user", "content": "go"},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": "a", "name": "list_dir", "arguments": '{"path":"."}'},
+            {"id": "b", "name": "read_file", "arguments": '{"path":"x"}'},
+        ],
+    },
+    {"role": "tool", "tool_call_id": "a", "content": "[F] x"},
+    {"role": "tool", "tool_call_id": "b", "content": "ERROR: nope"},
+]
 
 
 def test_claude_message_conversion():
@@ -100,20 +119,32 @@ def test_openai_message_conversion():
 def test_demo_script_no_cross_user_cache():
     """review fix #7: interleave A's search, B's search, A's dedup; A must keep its own results."""
     from app.llm.demo import demo_script
+
     def hist(name, topic, url):
-        sysm = {"role": "system", "content": "Today is 2026-10-11. write this run's structured draft to staging/x/draft.json (..."}
-        calls = [("read_file", '{"name":"%s","topics":["%s"]}' % (name, topic)), ("list_dir", "[F] a"),
-                 ("web_search", f"- ev_00{len(name)} [hn] {topic} story | {url} | ")]
+        sysm = {
+            "role": "system",
+            "content": "Today is 2026-10-11. write this run's structured draft to staging/x/draft.json (...",
+        }
+        calls = [
+            ("read_file", '{"name":"%s","topics":["%s"]}' % (name, topic)),
+            ("list_dir", "[F] a"),
+            ("web_search", f"- ev_00{len(name)} [hn] {topic} story | {url} | "),
+        ]
         msgs = [sysm, {"role": "user", "content": "go"}]
         for i, (n, out) in enumerate(calls):
-            msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": str(i), "name": n, "arguments": "{}"}]})
+            msgs.append(
+                {"role": "assistant", "content": "", "tool_calls": [{"id": str(i), "name": n, "arguments": "{}"}]}
+            )
             msgs.append({"role": "tool", "tool_call_id": str(i), "content": out})
         return msgs
+
     a, b = hist("Alice", "Robotics", "https://a.com/1"), hist("Bob", "LLM", "https://b.com/1")
     ra = demo_script(a)  # A -> search_content
-    demo_script(b)       # B searches in between
-    a += [{"role": "assistant", "content": "", "tool_calls": [{"id": "9", "name": "search_content", "arguments": "{}"}]},
-          {"role": "tool", "tool_call_id": "9", "content": "no matches"}]
+    demo_script(b)  # B searches in between
+    a += [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "9", "name": "search_content", "arguments": "{}"}]},
+        {"role": "tool", "tool_call_id": "9", "content": "no matches"},
+    ]
     w = demo_script(a)
     content = json.loads(w.tool_calls[0].arguments)["content"]
     assert ra.tool_calls[0].name == "search_content"
@@ -123,8 +154,11 @@ def test_demo_script_no_cross_user_cache():
 
 def test_equivalent_args_count_as_repeats(tmp_path):
     seq = iter(['{"path": "."}', '{ "path":"." }', '{"path":"."}'])
-    _, agent = make(tmp_path, lambda m: LLMResponse("", [ToolCall("x", "list_dir", next(seq, '{"path":"."}'))], "tool_use"),
-                    max_steps=4)
+    _, agent = make(
+        tmp_path,
+        lambda m: LLMResponse("", [ToolCall("x", "list_dir", next(seq, '{"path":"."}'))], "tool_use"),
+        max_steps=4,
+    )
     r = agent.run("go")
     outs = [t["output"] for t in r.trace if t["type"] == "tool"]
     assert "repeated 3 times" in outs[2]
@@ -141,6 +175,7 @@ def test_total_tool_call_budget(tmp_path):
 
 def test_run_deadline(tmp_path, monkeypatch):
     import app.agent as agent_mod
+
     # Step-start check fires before any tool call. today= skips date.today(), which also calls time.time().
     _, agent = make(tmp_path, lambda m: tc(len(m), "list_dir", path=f"{len(m)}"))
     agent.deadline_s = 1
@@ -163,8 +198,12 @@ def test_run_deadline(tmp_path, monkeypatch):
 
 def test_rss_feed_errors_are_reported(monkeypatch):
     import httpx
+
     from app.tools import news_tools
-    def boom(*a, **k): raise httpx.ConnectError("down")
+
+    def boom(*a, **k):
+        raise httpx.ConnectError("down")
+
     monkeypatch.setattr(news_tools.httpx, "get", boom)
     out = news_tools.web_search("llm", sources=["rss"])
     assert "rss/techcrunch_ai" in out and "errors:" in out
@@ -178,10 +217,17 @@ def _fetch_agent(tmp_path, script, fetch, max_steps=15):
 
 def test_failed_url_not_refetched_with_or_without_slash(tmp_path):
     calls = []
+
     def fetch(url, **k):
         calls.append(url)
         raise RuntimeError("DecodingError: boom")
-    urls = ["https://TechCrunch.com/a/", "https://techcrunch.com/a", "https://techcrunch.com/a/#x", "https://techcrunch.com/a?utm_source=x"]
+
+    urls = [
+        "https://TechCrunch.com/a/",
+        "https://techcrunch.com/a",
+        "https://techcrunch.com/a/#x",
+        "https://techcrunch.com/a?utm_source=x",
+    ]
     script = [tc(i, "fetch_url", url=u) for i, u in enumerate(urls)] + [LLMResponse("done", [], "end")]
     r = _fetch_agent(tmp_path, script, fetch).run("go")
     assert len(calls) == 1
@@ -190,11 +236,15 @@ def test_failed_url_not_refetched_with_or_without_slash(tmp_path):
 
 
 def test_consecutive_failing_rounds_stop_early(tmp_path):
-    def fetch(url, **k): raise RuntimeError("down")
+    def fetch(url, **k):
+        raise RuntimeError("down")
+
     seen = []
+
     def model(msgs):
         seen.append(msgs[-1])
         return tc(len(msgs), "fetch_url", url=f"https://ex.com/{len(msgs)}")
+
     r = _fetch_agent(tmp_path, model, fetch).run("go")
     assert r.stopped_reason == "tool_failures" and r.steps == 5
     assert any(m["role"] == "user" and "all failed" in m["content"] for m in seen)
@@ -202,11 +252,13 @@ def test_consecutive_failing_rounds_stop_early(tmp_path):
 
 def test_success_resets_failure_streak(tmp_path):
     n = {"i": 0}
+
     def fetch(url, **k):
         n["i"] += 1
         if n["i"] % 3 == 0:
             return "ok page"
         raise RuntimeError("down")
+
     script = [tc(i, "fetch_url", url=f"https://ex.com/{i}") for i in range(8)] + [LLMResponse("done", [], "end")]
     r = _fetch_agent(tmp_path, script, fetch).run("go")
     assert r.stopped_reason == "model_finished"

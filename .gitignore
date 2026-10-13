@@ -5,3 +5,8 @@ __pycache__/
 data/
 .pytest_cache/
 .DS_Store
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/

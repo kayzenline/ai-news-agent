@@ -1,0 +1,37 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long (formatted or long prompt strings)
+    "B008",  # do not perform function calls in argument defaults (FastAPI Form(...))
+    "E701",  # multiple statements on one line (used extensively in test mocks)
+    "E702",  # multiple statements on one line (semicolons in tests: s.add(u); s.commit())
+    "B904",  # raise ... from (idiomatic direct raises)
+    "E741",  # single character variable names like l for line
+    "E731",  # lambda assignment
+    "B018",  # property side-effect check (parts.port)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-W ignore::ResourceWarning"
+
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 95

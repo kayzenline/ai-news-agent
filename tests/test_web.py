@@ -1,21 +1,25 @@
-import importlib
 import json
+
 from fastapi.testclient import TestClient
 
 
 def test_pages_and_run(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     from app import config
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
-    from app import service, main
+    from app import main, service
     from app.tools import news_tools
+
     monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "- [hn] A | https://ex.com/a | ")
     with TestClient(main.app) as c:
         assert c.get("/").status_code == 200
         r = c.post("/users", data={"name": "Edison", "email": "e@x.com"})
         assert r.status_code == 200 and "订阅偏好" in r.text
-        c.post("/users/1/prefs", data={"name": "Edison", "topics": "大模型,Agent", "keywords": "LLM", "send_time": "02:00"})
+        c.post(
+            "/users/1/prefs", data={"name": "Edison", "topics": "大模型,Agent", "keywords": "LLM", "send_time": "02:00"}
+        )
         b = service.run_for_user(1)
         assert b.status == "ok"
         page = c.get(f"/briefs/{b.id}")
@@ -25,12 +29,13 @@ def test_pages_and_run(tmp_path, monkeypatch):
 def test_nickname_xss_is_sanitized(tmp_path, monkeypatch):
     """review fix #2: nickname reaches the brief heading; raw HTML must not survive rendering."""
     from app import config
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
-    from app import service, main
+    from app import main, service
     from app.tools import news_tools
-    monkeypatch.setattr(news_tools, "web_search",
-                        lambda query, **k: "- [hn] A | https://ex.com/a | ")
+
+    monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "- [hn] A | https://ex.com/a | ")
     evil = "<img src=x onerror=alert(1)>"
     with TestClient(main.app) as c:
         c.post("/users", data={"name": evil, "email": "e@x.com"})
@@ -45,36 +50,57 @@ def test_nickname_xss_is_sanitized(tmp_path, monkeypatch):
 
 def test_render_markdown_allowlist():
     from app.main import render_markdown
-    out = render_markdown('# hi <script>alert(1)</script>\n\n[x](javascript:alert(1)) [ok](https://ex.com)')
+
+    out = render_markdown("# hi <script>alert(1)</script>\n\n[x](javascript:alert(1)) [ok](https://ex.com)")
     assert "<script" not in out and "javascript:" not in out and 'href="https://ex.com"' in out
 
 
 def _setup(tmp_path, monkeypatch):
-    from app import config, service, db
+    from app import config, db, service
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     db.init_db()
     with db.SessionLocal() as s:
         u = db.User(name="Edison", email="e@x.com", email_enabled=1)
-        s.add(u); s.commit(); uid = u.id
+        s.add(u)
+        s.commit()
+        uid = u.id
     sent = []
     monkeypatch.setitem(config.SMTP, "enabled", True)
     monkeypatch.setattr(service, "send_email", lambda *a, **k: sent.append(a))
     from app.tools import news_tools
-    monkeypatch.setattr(news_tools, "web_search",
-                        lambda query, **k: "- [hn] A | https://ex.com/a | \n- [hn] B | https://ex.com/b | ")
+
+    monkeypatch.setattr(
+        news_tools, "web_search", lambda query, **k: "- [hn] A | https://ex.com/a | \n- [hn] B | https://ex.com/b | "
+    )
     return service, uid, sent
 
 
 def D(*ids, title="Story"):
     """合法 draft.json：每个 evidence id 一条。"""
-    return json.dumps({"schema_version": 1, "items": [
-        {"title": f"{title} {i}", "topic": "AI", "summary": "Short summary.", "why_it_matters": "You follow AI.",
-         "evidence_ids": [i]} for i in ids]})
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "items": [
+                {
+                    "title": f"{title} {i}",
+                    "topic": "AI",
+                    "summary": "Short summary.",
+                    "why_it_matters": "You follow AI.",
+                    "evidence_ids": [i],
+                }
+                for i in ids
+            ],
+        }
+    )
 
 
 def _writer(text):
-    import json, re
+    import json
+    import re
+
     from app.llm.base import LLMResponse, ToolCall
+
     def model(msgs):
         n = sum(1 for m in msgs if m["role"] == "tool")
         if n == 0:
@@ -83,13 +109,15 @@ def _writer(text):
             return LLMResponse("done", [], "end")
         out = re.search(r"draft to (\S+)", msgs[0]["content"]).group(1)
         return LLMResponse("", [ToolCall("w", "write_file", json.dumps({"path": out, "content": text}))], "tool_use")
+
     return model
 
 
 def test_stale_same_day_file_does_not_mark_run_ok(tmp_path, monkeypatch):
     """review fix #3: second run that writes nothing must fail and not re-send email."""
-    from app.llm.providers import FakeProvider
     from app.llm.base import LLMResponse
+    from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     b1 = service.run_for_user(uid, llm=FakeProvider(_writer(D("ev_001"))), today="2026-10-11")
     b2 = service.run_for_user(uid, llm=FakeProvider([LLMResponse("nothing", [], "end")]), today="2026-10-11")
@@ -100,8 +128,10 @@ def test_stale_same_day_file_does_not_mark_run_ok(tmp_path, monkeypatch):
 def test_same_day_runs_keep_their_own_body(tmp_path, monkeypatch):
     """review fix #4 + design review P1-2: history is append-only, A -> B -> A still finds A."""
     from pathlib import Path
+
     from app.llm.providers import FakeProvider
     from app.tools import fs_tools
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     b1 = service.run_for_user(uid, llm=FakeProvider(_writer(D("ev_001"))), today="2026-10-11")
     b2 = service.run_for_user(uid, llm=FakeProvider(_writer(D("ev_002"))), today="2026-10-11")
@@ -121,14 +151,17 @@ def test_model_cannot_rewrite_history_or_profile(tmp_path, monkeypatch):
     """design review P1-2: the agent may only write its own staging dir."""
     import json
     from pathlib import Path
+
     from app.llm.base import LLMResponse, ToolCall
     from app.llm.providers import FakeProvider
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     b1 = service.run_for_user(uid, llm=FakeProvider(_writer(D("ev_001"))), today="2026-10-11")
     hist = next((tmp_path / "workspaces" / f"user_{uid}" / "briefs").rglob("*.md"))
     before_run, before_hist = Path(b1.path).read_text(), hist.read_text()
     rel_old = str(Path(b1.path).relative_to(tmp_path / "workspaces" / f"user_{uid}"))
     seen = []
+
     def evil(msgs):
         if msgs[-1]["role"] == "tool":
             seen.append(msgs[-1]["content"])
@@ -136,9 +169,13 @@ def test_model_cannot_rewrite_history_or_profile(tmp_path, monkeypatch):
             return LLMResponse("done", [], "end")
         targets = ["profile.json", str(hist.relative_to(hist.parents[2])), rel_old]
         if len(seen) < 3:
-            return LLMResponse("", [ToolCall(f"e{len(seen)}", "write_file",
-                               json.dumps({"path": targets[len(seen)], "content": "pwned"}))], "tool_use")
+            return LLMResponse(
+                "",
+                [ToolCall(f"e{len(seen)}", "write_file", json.dumps({"path": targets[len(seen)], "content": "pwned"}))],
+                "tool_use",
+            )
         return LLMResponse("", [ToolCall("m", "bash", json.dumps({"command": "mkdir -p briefs/x"}))], "tool_use")
+
     service.run_for_user(uid, llm=FakeProvider(evil), today="2026-10-12")
     assert all(o.startswith("ERROR") and "read-only" in o for o in seen)
     assert Path(b1.path).read_text() == before_run and hist.read_text() == before_hist
@@ -148,6 +185,7 @@ def test_model_cannot_rewrite_history_or_profile(tmp_path, monkeypatch):
 def test_invalid_send_time_rejected_and_startup_survives(tmp_path, monkeypatch):
     """review fix #5: 25:00 must be rejected before commit; a bad stored value must not crash startup."""
     from app import config, db, main, scheduler
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     with TestClient(main.app) as c:
         c.post("/users", data={"name": "A", "email": "a@x.com"})
@@ -163,6 +201,7 @@ def test_invalid_send_time_rejected_and_startup_survives(tmp_path, monkeypatch):
 def test_fabricated_link_is_fed_back_then_rejected(tmp_path, monkeypatch):
     """design review P1-1: links must come from this run's tool evidence; errors go back to the model."""
     from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     b = service.run_for_user(uid, llm=FakeProvider(_always_writer(D("ev_999"))), today="2026-10-11")
     assert b.status == "failed" and b.stopped_reason == "validation_failed"
@@ -173,17 +212,21 @@ def test_fabricated_link_is_fed_back_then_rejected(tmp_path, monkeypatch):
 
 def _always_writer(text):
     import re
+
     from app.llm.base import LLMResponse, ToolCall
+
     def model(msgs):
         if msgs[-1]["role"] == "tool":
             return LLMResponse("done", [], "end")
         out = re.search(r"draft to (\S+)", msgs[0]["content"]).group(1)
         return LLMResponse("", [ToolCall("w", "write_file", json.dumps({"path": out, "content": text}))], "tool_use")
+
     return model
 
 
 def test_zero_items_is_no_news_and_not_emailed(tmp_path, monkeypatch):
     from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     b = service.run_for_user(uid, llm=FakeProvider(_writer(D())), today="2026-10-11")
     assert b.status == "no_news" and sent == []
@@ -191,8 +234,9 @@ def test_zero_items_is_no_news_and_not_emailed(tmp_path, monkeypatch):
 
 def test_run_is_recorded_before_execution_and_dedups(tmp_path, monkeypatch):
     """design review P1-3: a run row exists from acceptance; same user can't start two; failures get a terminal state."""
-    from app.llm.providers import FakeProvider
     from app.db import Run, SessionLocal
+    from app.llm.providers import FakeProvider
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     r1 = service.submit_run(uid, llm=FakeProvider(_writer(D("ev_001"))), today="2026-10-11")
     r2 = service.submit_run(uid, llm=FakeProvider(_writer(D())), today="2026-10-11")
@@ -205,8 +249,12 @@ def test_run_is_recorded_before_execution_and_dedups(tmp_path, monkeypatch):
 
 def test_run_init_failure_is_visible(tmp_path, monkeypatch):
     from app.db import Run, SessionLocal
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
-    def boom(*a, **k): raise RuntimeError("no API key")
+
+    def boom(*a, **k):
+        raise RuntimeError("no API key")
+
     monkeypatch.setattr(service, "get_provider", boom)
     service.submit_run(uid)
     service.wait_all()
@@ -217,9 +265,11 @@ def test_run_init_failure_is_visible(tmp_path, monkeypatch):
 
 def test_idempotency_key_and_interrupted_recovery(tmp_path, monkeypatch):
     from app.db import Run, SessionLocal
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     with SessionLocal() as s:
-        s.add(Run(run_id="old-1", user_id=uid, trigger="manual", status="running")); s.commit()
+        s.add(Run(run_id="old-1", user_id=uid, trigger="manual", status="running"))
+        s.commit()
     assert service.recover_interrupted() == 1
     monkeypatch.setattr(service, "get_provider", lambda: (_ for _ in ()).throw(RuntimeError("x")))
     a = service.submit_run(uid, trigger="scheduled", idempotency_key="sched:1:2026-10-11")
@@ -232,7 +282,7 @@ def test_idempotency_key_and_interrupted_recovery(tmp_path, monkeypatch):
 
 def test_queue_capacity_is_explicit(tmp_path, monkeypatch):
     from app import config
-    from app.db import Run, SessionLocal
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "MAX_QUEUED_RUNS", 0)
     r = service.submit_run(uid)
@@ -241,9 +291,11 @@ def test_queue_capacity_is_explicit(tmp_path, monkeypatch):
 
 def test_run_now_endpoint_and_status(tmp_path, monkeypatch):
     from app import config, main, service
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
     from app.tools import news_tools
+
     monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "- [hn] A | https://ex.com/a | ")
     with TestClient(main.app) as c:
         c.post("/users", data={"name": "E", "email": "e@x.com"})
@@ -259,12 +311,14 @@ def test_activity_snapshot_tracks_completion_and_only_current_user(tmp_path, mon
     """页面轮询能看到新运行和终态，且快照仅包含该用户的记录。"""
     from app import config, main
     from app.db import Brief, Run, SessionLocal, User
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     with TestClient(main.app) as c:
         c.post("/users", data={"name": "E", "email": "e@x.com"})
         with SessionLocal() as s:
             other = User(name="Other", email="other@x.com")
-            s.add(other); s.flush()
+            s.add(other)
+            s.flush()
             s.add(Run(run_id="other-run", user_id=other.id, trigger="manual", status="failed", error="private"))
             s.add(Run(run_id="watched", user_id=1, trigger="scheduled", status="running"))
             s.add(Brief(user_id=other.id, date="2026-10-13", path="private-path", status="ok"))
@@ -275,12 +329,22 @@ def test_activity_snapshot_tracks_completion_and_only_current_user(tmp_path, mon
         assert response.json()["runs"][0]["status"] == "running"
         assert response.json()["briefs"] == []
         with SessionLocal() as s:
-            brief = Brief(user_id=1, date="2026-10-13", path="local-path", status="ok",
-                          stopped_reason="model_finished", steps=3, tokens_in=20, tokens_out=10)
-            s.add(brief); s.flush()
+            brief = Brief(
+                user_id=1,
+                date="2026-10-13",
+                path="local-path",
+                status="ok",
+                stopped_reason="model_finished",
+                steps=3,
+                tokens_in=20,
+                tokens_out=10,
+            )
+            s.add(brief)
+            s.flush()
             run = s.query(Run).filter_by(run_id="watched").one()
             run.status, run.brief_id = "succeeded", brief.id
-            s.commit(); bid = brief.id
+            s.commit()
+            bid = brief.id
         finished = c.get("/users/1/activity").json()
         assert finished["runs"][0]["status"] == "succeeded"
         assert finished["runs"][0]["brief_id"] == bid
@@ -293,6 +357,7 @@ def test_activity_snapshot_tracks_completion_and_only_current_user(tmp_path, mon
 def test_run_now_supports_json_without_navigation(tmp_path, monkeypatch):
     """JS 提交使用 JSON，普通表单继续跳转；异常结果也能直接显示。"""
     from app import config, main, service
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(service, "get_provider", lambda: (_ for _ in ()).throw(RuntimeError("test failure")))
     with TestClient(main.app) as c:
@@ -313,11 +378,15 @@ def test_run_now_supports_json_without_navigation(tmp_path, monkeypatch):
 
 def test_init_db_adds_missing_columns_to_old_db(tmp_path, monkeypatch):
     import sqlite3
+
     from app import config, db
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     con = sqlite3.connect(tmp_path / "app.db")
-    con.executescript("CREATE TABLE briefs (id INTEGER PRIMARY KEY, user_id INTEGER, date VARCHAR(10), path VARCHAR(300),"
-                      " status VARCHAR(20)); CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(80), email VARCHAR(200));")
+    con.executescript(
+        "CREATE TABLE briefs (id INTEGER PRIMARY KEY, user_id INTEGER, date VARCHAR(10), path VARCHAR(300),"
+        " status VARCHAR(20)); CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(80), email VARCHAR(200));"
+    )
     con.close()
     db.init_db()
     cols = {r[1] for r in sqlite3.connect(tmp_path / "app.db").execute("PRAGMA table_info(briefs)")}
@@ -328,13 +397,16 @@ def test_business_date_and_catch_up_use_user_timezone(tmp_path, monkeypatch):
     """design review P1-4: date follows the user's IANA zone; missed runs are caught up once inside the window."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    from app import scheduler
+
+    from app import config, scheduler
     from app.db import SessionLocal, User
-    from app import config
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "CATCHUP_HOURS", 6)
     with SessionLocal() as s:
-        u = s.get(User, uid); u.timezone, u.send_time = "Australia/Sydney", "08:00"; s.commit()
+        u = s.get(User, uid)
+        u.timezone, u.send_time = "Australia/Sydney", "08:00"
+        s.commit()
         u = s.get(User, uid)
     utc = ZoneInfo("UTC")
     # 2026-10-12 22:30 UTC = 2026-10-13 09:30 悉尼（UTC+11）
@@ -353,13 +425,16 @@ def test_dst_gap_start_time_still_due(tmp_path, monkeypatch):
     """Sydney 2026-10-04 02:30 doesn't exist (clocks jump 02:00 -> 03:00); the catch-up scan still fires that day."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    from app import scheduler
+
+    from app import config, scheduler
     from app.db import SessionLocal, User
-    from app import config
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "CATCHUP_HOURS", 6)
     with SessionLocal() as s:
-        u = s.get(User, uid); u.timezone, u.send_time = "Australia/Sydney", "02:30"; s.commit()
+        u = s.get(User, uid)
+        u.timezone, u.send_time = "Australia/Sydney", "02:30"
+        s.commit()
     assert scheduler.due_users(datetime(2026, 10, 3, 15, 50, tzinfo=ZoneInfo("UTC"))) == []  # 01:50 AEST
     now = datetime(2026, 10, 3, 16, 10, tzinfo=ZoneInfo("UTC"))  # 03:10 AEDT
     assert scheduler.due_users(now) == [(uid, "2026-10-04")]
@@ -367,6 +442,7 @@ def test_dst_gap_start_time_still_due(tmp_path, monkeypatch):
 
 def test_invalid_timezone_rejected(tmp_path, monkeypatch):
     from app import config, main
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     with TestClient(main.app) as c:
         c.post("/users", data={"name": "A", "email": "a@x.com"})
@@ -377,15 +453,18 @@ def test_invalid_timezone_rejected(tmp_path, monkeypatch):
 def test_delivery_is_separate_from_generation(tmp_path, monkeypatch):
     """design review P1-5: email outcome has its own record; retry resends the same body without rerunning the model."""
     from pathlib import Path
-    from app import config
+
     from app.db import Delivery, SessionLocal
     from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     calls = []
+
     def flaky(to, subject, body, **k):
         calls.append(body)
         if len(calls) == 1:
             raise OSError("smtp down")
+
     monkeypatch.setattr(service, "send_email", flaky)
     b = service.run_for_user(uid, llm=FakeProvider(_writer(D("ev_001"))), today="2026-10-11")
     assert b.status == "ok" and b.stopped_reason == "model_finished"  # 不再把邮件错误拼进生成结果
@@ -402,6 +481,7 @@ def test_email_on_but_smtp_off_is_visible(tmp_path, monkeypatch):
     from app import config
     from app.db import Delivery, SessionLocal
     from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     monkeypatch.setitem(config.SMTP, "enabled", False)
     service.run_for_user(uid, llm=FakeProvider(_writer(D("ev_001"))), today="2026-10-11")
@@ -412,10 +492,14 @@ def test_email_on_but_smtp_off_is_visible(tmp_path, monkeypatch):
 
 def test_stuck_sending_marked_unknown(tmp_path, monkeypatch):
     from app.db import Brief, Delivery, SessionLocal
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     with SessionLocal() as s:
-        b = Brief(user_id=uid, date="2026-10-11", path="x", status="ok"); s.add(b); s.flush()
-        s.add(Delivery(brief_id=b.id, recipient="e@x.com", status="sending")); s.commit()
+        b = Brief(user_id=uid, date="2026-10-11", path="x", status="ok")
+        s.add(b)
+        s.flush()
+        s.add(Delivery(brief_id=b.id, recipient="e@x.com", status="sending"))
+        s.commit()
     assert service.mark_stuck_deliveries() == 1
     with SessionLocal() as s:
         assert s.query(Delivery).one().status == "unknown"
@@ -424,7 +508,9 @@ def test_stuck_sending_marked_unknown(tmp_path, monkeypatch):
 def test_service_renders_brief_and_keeps_draft_and_evidence(tmp_path, monkeypatch):
     """structured contract: model writes draft.json only; Service renders Markdown and stores draft + evidence."""
     from pathlib import Path
+
     from app.llm.providers import FakeProvider
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     b = service.run_for_user(uid, llm=FakeProvider(_writer(D("ev_002", "ev_001"))), today="2026-10-11")
     assert b.status == "ok"
@@ -437,6 +523,7 @@ def test_service_renders_brief_and_keeps_draft_and_evidence(tmp_path, monkeypatc
 
 def test_markdown_draft_is_rejected(tmp_path, monkeypatch):
     from app.llm.providers import FakeProvider
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     b = service.run_for_user(uid, llm=FakeProvider(_always_writer("# brief\n- https://ex.com/a")), today="2026-10-11")
     assert b.status == "failed" and "not valid JSON" in b.trace_json
@@ -444,10 +531,13 @@ def test_markdown_draft_is_rejected(tmp_path, monkeypatch):
 
 def test_revision_loop_fixes_draft(tmp_path, monkeypatch):
     import re
+
     from app.llm.base import LLMResponse, ToolCall
     from app.llm.providers import FakeProvider
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     state = {"writes": 0}
+
     def model(msgs):
         last = msgs[-1]
         out = re.search(r"draft to (\S+)", msgs[0]["content"]).group(1)
@@ -457,7 +547,12 @@ def test_revision_loop_fixes_draft(tmp_path, monkeypatch):
             return LLMResponse("done", [], "end")
         state["writes"] += 1
         content = D("ev_404") if state["writes"] == 1 else D("ev_001")
-        return LLMResponse("", [ToolCall(f"w{state['writes']}", "write_file", json.dumps({"path": out, "content": content}))], "tool_use")
+        return LLMResponse(
+            "",
+            [ToolCall(f"w{state['writes']}", "write_file", json.dumps({"path": out, "content": content}))],
+            "tool_use",
+        )
+
     b = service.run_for_user(uid, llm=FakeProvider(model), today="2026-10-11")
     assert b.status == "ok" and state["writes"] == 2
     assert "unknown evidence ids" in b.trace_json
@@ -466,6 +561,7 @@ def test_revision_loop_fixes_draft(tmp_path, monkeypatch):
 def test_zero_search_empty_draft_is_marked_failed(tmp_path, monkeypatch):
     """Zero searches before writing an empty draft must be marked failed, not no_news."""
     from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     b = service.run_for_user(uid, llm=FakeProvider(_always_writer(D())), today="2026-10-11")
     assert b.status == "failed" and b.stopped_reason == "insufficient_search"
@@ -474,8 +570,9 @@ def test_zero_search_empty_draft_is_marked_failed(tmp_path, monkeypatch):
 
 def test_all_sources_failed_returns_false_and_cannot_be_no_news(tmp_path, monkeypatch):
     """When all search sources fail, tool returns ok=False and empty draft cannot be no_news."""
-    from app.tools import news_tools
     from app.llm.providers import FakeProvider
+    from app.tools import news_tools
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "errors: hn: HTTP 500; rss: timeout; arxiv: down")
     b = service.run_for_user(uid, llm=FakeProvider(_writer(D())), today="2026-10-11")
@@ -486,8 +583,9 @@ def test_all_sources_failed_returns_false_and_cannot_be_no_news(tmp_path, monkey
 
 def test_successful_search_with_no_hits_allows_valid_no_news(tmp_path, monkeypatch):
     """When search succeeds without errors but returns no items, empty draft is legitimately no_news."""
-    from app.tools import news_tools
     from app.llm.providers import FakeProvider
+    from app.tools import news_tools
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "no results")
     b = service.run_for_user(uid, llm=FakeProvider(_writer(D())), today="2026-10-11")
@@ -498,26 +596,34 @@ def test_concurrent_deliver_claims_atomically(tmp_path, monkeypatch):
     """Concurrent delivery claims must be atomic: only one thread sends email, preventing duplicates."""
     import threading
     import time
+
     from app.db import Brief, Delivery, SessionLocal
+
     service, uid, _ = _setup(tmp_path, monkeypatch)
     with SessionLocal() as s:
         b = Brief(user_id=uid, date="2026-10-11", path=str(tmp_path / "b.md"), status="ok")
-        s.add(b); s.flush()
+        s.add(b)
+        s.flush()
         d = Delivery(brief_id=b.id, recipient="e@x.com", status="pending")
-        s.add(d); s.commit()
+        s.add(d)
+        s.commit()
         did = d.id
     (tmp_path / "b.md").write_text("news body")
 
     sent_calls = []
+
     def slow_send(to, subject, body, **k):
         time.sleep(0.05)
         sent_calls.append(body)
+
     monkeypatch.setattr(service, "send_email", slow_send)
 
     t1 = threading.Thread(target=lambda: service.deliver(did))
     t2 = threading.Thread(target=lambda: service.deliver(did))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     assert len(sent_calls) == 1
     with SessionLocal() as s:
@@ -528,17 +634,25 @@ def test_concurrent_deliver_claims_atomically(tmp_path, monkeypatch):
 def test_run_with_form_data_auto_saves_preferences(tmp_path, monkeypatch):
     """When /users/{uid}/run is submitted with form data, preferences are automatically updated first."""
     from fastapi.testclient import TestClient
-    from app import config, main, service, db
+
+    from app import config, db, main, service
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
     db.init_db()
     with db.SessionLocal() as s:
         u = db.User(name="Eddie", email="eddie@example.com", topics=["金融"], keywords=["股票"])
-        s.add(u); s.commit(); uid = u.id
+        s.add(u)
+        s.commit()
+        uid = u.id
 
     with TestClient(main.app) as c:
         # Submit run with updated topics and keywords form
-        r = c.post(f"/users/{uid}/run", data={"name": "Eddie", "topics": "LLM, AI", "keywords": "数据中心", "language": "zh"}, follow_redirects=False)
+        r = c.post(
+            f"/users/{uid}/run",
+            data={"name": "Eddie", "topics": "LLM, AI", "keywords": "数据中心", "language": "zh"},
+            follow_redirects=False,
+        )
         assert r.status_code == 303
 
     service.wait_all()
@@ -553,9 +667,11 @@ def test_max_steps_with_valid_draft_publishes_with_warning_annotation(tmp_path, 
     """If agent reaches max_steps but wrote a valid draft, service publishes it with a warning annotation."""
     import re
     from pathlib import Path
+
     from app import config
-    from app.llm.providers import FakeProvider
     from app.llm.base import LLMResponse, ToolCall
+    from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "MAX_STEPS", 2)
 
@@ -565,7 +681,9 @@ def test_max_steps_with_valid_draft_publishes_with_warning_annotation(tmp_path, 
             return LLMResponse("", [ToolCall("s", "web_search", json.dumps({"query": "ai"}))], "tool_use")
         # Step 2: write draft and do not yield an empty tool_call turn (exhausts max_steps=2)
         out = re.search(r"draft to (\S+)", msgs[0]["content"]).group(1)
-        return LLMResponse("", [ToolCall("w", "write_file", json.dumps({"path": out, "content": D("ev_001")}))], "tool_use")
+        return LLMResponse(
+            "", [ToolCall("w", "write_file", json.dumps({"path": out, "content": D("ev_001")}))], "tool_use"
+        )
 
     b = service.run_for_user(uid, llm=FakeProvider(step2_model), today="2026-10-11")
     assert b.status == "ok"
@@ -580,8 +698,9 @@ def test_max_steps_with_valid_draft_publishes_with_warning_annotation(tmp_path, 
 def test_max_steps_without_valid_draft_still_fails(tmp_path, monkeypatch):
     """If agent reaches max_steps without writing a valid draft, status remains failed."""
     from app import config
-    from app.llm.providers import FakeProvider
     from app.llm.base import LLMResponse, ToolCall
+    from app.llm.providers import FakeProvider
+
     service, uid, sent = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "MAX_STEPS", 2)
 
@@ -595,7 +714,9 @@ def test_max_steps_without_valid_draft_still_fails(tmp_path, monkeypatch):
 
 def test_fetch_url_extracts_pdf_text(tmp_path, monkeypatch):
     import io
+
     from pypdf import PdfWriter
+
     from app.tools import news_tools
     from app.tools.registry import ToolRegistry
     from app.tools.sandbox import Sandbox
@@ -610,7 +731,9 @@ def test_fetch_url_extracts_pdf_text(tmp_path, monkeypatch):
     assert "no extractable text" in news_tools._extract_pdf_text(pdf_bytes)
 
     # PDF fetch returns extracted text
-    monkeypatch.setattr(news_tools, "_get_limited", lambda url, **k: (True, "Deep learning breakthrough details in PDF"))
+    monkeypatch.setattr(
+        news_tools, "_get_limited", lambda url, **k: (True, "Deep learning breakthrough details in PDF")
+    )
     reg = ToolRegistry(Sandbox(tmp_path))
     ok, out = reg.call("fetch_url", {"url": "https://example.com/paper.pdf"})
     assert ok
@@ -619,7 +742,9 @@ def test_fetch_url_extracts_pdf_text(tmp_path, monkeypatch):
 
 def test_blank_name_or_email_is_rejected(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    from app import config, main, db
+
+    from app import config, db, main
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     db.init_db()
     with TestClient(main.app) as c:
@@ -630,7 +755,9 @@ def test_blank_name_or_email_is_rejected(tmp_path, monkeypatch):
 def test_login_with_mismatched_nickname_is_rejected(tmp_path, monkeypatch):
     """If an email already exists, submitting with a different nickname is rejected with error notice."""
     from fastapi.testclient import TestClient
-    from app import config, main, db
+
+    from app import config, db, main
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     db.init_db()
     with TestClient(main.app) as c:

@@ -1,9 +1,9 @@
 """一次真实模型配置检查：验证鉴权、接口与工具调用，不搜新闻、不发邮件。"""
+
 import json
 
 from .. import config
 from .providers import get_provider
-
 
 CHECK_TOOL = {
     "type": "function",
@@ -32,10 +32,16 @@ def main() -> int:
     client = provider.client.with_options(timeout=20, max_retries=0)
     provider.client = client
     try:
-        response = provider.chat([
-            {"role": "system", "content": "You are testing tool support. Call configuration_check exactly once with {}. Do not reply with text."},
-            {"role": "user", "content": "Check tool calling now."},
-        ], [CHECK_TOOL])
+        response = provider.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "You are testing tool support. Call configuration_check exactly once with {}. Do not reply with text.",
+                },
+                {"role": "user", "content": "Check tool calling now."},
+            ],
+            [CHECK_TOOL],
+        )
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         messages = {
@@ -58,8 +64,7 @@ def main() -> int:
 
     calls = response.tool_calls
     try:
-        supported = (len(calls) == 1 and calls[0].name == "configuration_check"
-                     and json.loads(calls[0].arguments) == {})
+        supported = len(calls) == 1 and calls[0].name == "configuration_check" and json.loads(calls[0].arguments) == {}
     except (ValueError, TypeError):
         supported = False
     if not supported:

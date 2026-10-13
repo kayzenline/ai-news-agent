@@ -1,4 +1,5 @@
 import json
+
 from app.brief import history_urls, render_markdown, validate_draft
 from app.evidence import EvidenceStore
 
@@ -11,8 +12,13 @@ def store():
 
 
 def item(**k):
-    base = {"title": "A ships tools", "topic": "AI Agent", "summary": "Short.", "why_it_matters": "You follow agents.",
-            "evidence_ids": ["ev_001"]}
+    base = {
+        "title": "A ships tools",
+        "topic": "AI Agent",
+        "summary": "Short.",
+        "why_it_matters": "You follow agents.",
+        "evidence_ids": ["ev_001"],
+    }
     base.update(k)
     return base
 
@@ -38,7 +44,12 @@ def test_rejects_bad_json_and_schema():
     assert "not valid JSON" in validate_draft("{oops", store())[1][0]
     errs = validate_draft(json.dumps({"schema_version": 2, "items": [item(extra=1, summary="")], "x": 1}), store())[1]
     joined = " ".join(errs)
-    assert "schema_version" in joined and "unknown top-level" in joined and "unknown fields" in joined and "summary" in joined
+    assert (
+        "schema_version" in joined
+        and "unknown top-level" in joined
+        and "unknown fields" in joined
+        and "summary" in joined
+    )
 
 
 def test_rejects_unknown_or_missing_evidence_and_inline_urls():
@@ -52,7 +63,7 @@ def test_rejects_too_many_duplicates_and_published():
     s = EvidenceStore()
     for i in range(11):
         s.add("web_search", "hn", f"t{i}", f"https://ex.com/{i}")
-    errs = validate_draft(draft(*[item(evidence_ids=[f"ev_{i+1:03d}"]) for i in range(11)]), s)[1]
+    errs = validate_draft(draft(*[item(evidence_ids=[f"ev_{i + 1:03d}"]) for i in range(11)]), s)[1]
     assert "too many items" in errs[0]
     errs = validate_draft(draft(item(), item(title="again")), store())[1]
     assert "same source" in " ".join(errs)
@@ -68,6 +79,7 @@ def test_render_escapes_model_text():
     d, _ = validate_draft(draft(item(title="<img src=x onerror=1> [x](javascript:alert(1))")), store())
     md = render_markdown(d, store(), "<b>E</b>", "2026-10-11")
     from app.main import render_markdown as to_html
+
     html = to_html(md)
     assert "<img" not in html and "<b>" not in html and "&lt;b&gt;E" in html
     assert 'href="javascript' not in html

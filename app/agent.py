@@ -1,6 +1,6 @@
 """手写 Agent 循环：模型决定调用哪个工具、调用几次、何时停止。"""
+
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -46,21 +46,25 @@ MAX_REPAIRS = 2
 
 
 class Agent:
-    def __init__(self, llm: LLMProvider, tools: ToolRegistry, max_steps: int | None = None,
-                 max_tool_calls: int | None = None, deadline_s: float | None = None):
+    def __init__(
+        self,
+        llm: LLMProvider,
+        tools: ToolRegistry,
+        max_steps: int | None = None,
+        max_tool_calls: int | None = None,
+        deadline_s: float | None = None,
+    ):
         self.llm, self.tools = llm, tools
         self.max_steps = max_steps or config.MAX_STEPS
         self.max_tool_calls = max_tool_calls or config.MAX_TOOL_CALLS
         self.deadline_s = deadline_s or config.RUN_DEADLINE_S
 
-    def run(self, task: str, today: str | None = None, output: str | None = None,
-            validator=None) -> AgentResult:
+    def run(self, task: str, today: str | None = None, output: str | None = None, validator=None) -> AgentResult:
         """validator(res) -> list[str]：模型结束时调用；有错误且修订次数未满时把错误回传给模型继续。"""
         today = today or date.today().isoformat()
         output = output or f"briefs/{today}.md"
         prompt = SYSTEM_PROMPT.replace("{today}", today).replace("{output}", output)
-        messages = [{"role": "system", "content": prompt},
-                    {"role": "user", "content": task}]
+        messages = [{"role": "system", "content": prompt}, {"role": "user", "content": task}]
         res = AgentResult(final_text="")
         seen_calls: dict[str, int] = {}
         repairs = 0
@@ -72,7 +76,9 @@ class Agent:
             res.steps = step
             t0 = time.time()
             if t0 - run_start > self.deadline_s:
-                res.trace.append({"step": step, "type": "budget", "error": f"run deadline {self.deadline_s:.0f}s exceeded"})
+                res.trace.append(
+                    {"step": step, "type": "budget", "error": f"run deadline {self.deadline_s:.0f}s exceeded"}
+                )
                 res.stopped_reason, res.final_text = "deadline", "stopped: run deadline exceeded"
                 return res
             try:
@@ -83,8 +89,16 @@ class Agent:
                 return res
             res.usage["input"] += resp.usage.get("input", 0)
             res.usage["output"] += resp.usage.get("output", 0)
-            res.trace.append({"step": step, "type": "llm", "text": resp.text, "stop_reason": resp.stop_reason,
-                              "tool_calls": [c.__dict__ for c in resp.tool_calls], "ms": int((time.time() - t0) * 1000)})
+            res.trace.append(
+                {
+                    "step": step,
+                    "type": "llm",
+                    "text": resp.text,
+                    "stop_reason": resp.stop_reason,
+                    "tool_calls": [c.__dict__ for c in resp.tool_calls],
+                    "ms": int((time.time() - t0) * 1000),
+                }
+            )
             if not resp.tool_calls:
                 # 模型不再请求工具 => 它认为任务完成
                 res.final_text = resp.text
@@ -97,13 +111,19 @@ class Agent:
                         if repairs < MAX_REPAIRS and step < self.max_steps:
                             repairs += 1
                             messages.append({"role": "assistant", "content": resp.text})
-                            messages.append({"role": "user", "content": "The draft failed validation; fix it and rewrite the draft file:\n- "
-                                             + "\n- ".join(errors)})
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": "The draft failed validation; fix it and rewrite the draft file:\n- "
+                                    + "\n- ".join(errors),
+                                }
+                            )
                             continue
                         res.stopped_reason = "validation_failed"
                 return res
-            messages.append({"role": "assistant", "content": resp.text,
-                             "tool_calls": [c.__dict__ for c in resp.tool_calls]})
+            messages.append(
+                {"role": "assistant", "content": resp.text, "tool_calls": [c.__dict__ for c in resp.tool_calls]}
+            )
             round_ok = False
             for c in resp.tool_calls:
                 key = call_key(c.name, c.arguments)
@@ -111,13 +131,21 @@ class Agent:
                 tool_calls += 1
                 t1 = time.time()
                 if tool_calls > self.max_tool_calls:
-                    ok, out = False, f"ERROR: tool-call budget ({self.max_tool_calls}) exhausted; write the brief with what you have and finish."
+                    ok, out = (
+                        False,
+                        f"ERROR: tool-call budget ({self.max_tool_calls}) exhausted; write the brief with what you have and finish.",
+                    )
                 elif t1 - run_start > self.deadline_s:
                     ok, out = False, "ERROR: run deadline exceeded; finish now."
                 elif key in failed:
                     # 同一目标本轮已失败过：直接返回缓存的短错误，不再请求
-                    ok, out = False, (f"ERROR: this call already failed earlier in this run ({failed[key]}); "
-                                      "do NOT retry it (with or without trailing slash); use another source or finish.")
+                    ok, out = (
+                        False,
+                        (
+                            f"ERROR: this call already failed earlier in this run ({failed[key]}); "
+                            "do NOT retry it (with or without trailing slash); use another source or finish."
+                        ),
+                    )
                 elif seen_calls[key] > 2:
                     ok, out = False, "ERROR: identical call repeated 3 times; change approach or finish."
                 else:
@@ -125,21 +153,45 @@ class Agent:
                     if not ok and c.name in NETWORK_TOOLS:
                         failed[key] = out.removeprefix("ERROR: ")[:160]
                 round_ok = round_ok or ok
-                res.trace.append({"step": step, "type": "tool", "name": c.name, "arguments": c.arguments,
-                                  "ok": ok, "output": out[:2000], "ms": int((time.time() - t1) * 1000)})
+                res.trace.append(
+                    {
+                        "step": step,
+                        "type": "tool",
+                        "name": c.name,
+                        "arguments": c.arguments,
+                        "ok": ok,
+                        "output": out[:2000],
+                        "ms": int((time.time() - t1) * 1000),
+                    }
+                )
                 messages.append({"role": "tool", "tool_call_id": c.id, "content": out})
             fail_rounds = 0 if round_ok else fail_rounds + 1
             if fail_rounds >= FAIL_ROUNDS_STOP:
-                res.trace.append({"step": step, "type": "budget",
-                                  "error": f"{fail_rounds} consecutive rounds where every tool call failed"})
+                res.trace.append(
+                    {
+                        "step": step,
+                        "type": "budget",
+                        "error": f"{fail_rounds} consecutive rounds where every tool call failed",
+                    }
+                )
                 res.stopped_reason, res.final_text = "tool_failures", "stopped: tools kept failing"
                 return res
             if fail_rounds == FAIL_ROUNDS_WARN:
-                messages.append({"role": "user", "content": "Your last tool calls all failed. Stop retrying the same "
-                                 "targets: write the draft now with the evidence you already have (an empty items list is fine)."})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Your last tool calls all failed. Stop retrying the same "
+                        "targets: write the draft now with the evidence you already have (an empty items list is fine).",
+                    }
+                )
             warn_step = self.max_steps - 2 if self.max_steps > 2 else self.max_steps - 1
             if step == warn_step:
-                messages.append({"role": "user", "content": "Step budget almost exhausted: write the brief now with what you have and finish."})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Step budget almost exhausted: write the brief now with what you have and finish.",
+                    }
+                )
         res.stopped_reason = "max_steps"
         res.final_text = "stopped: max steps reached"
         if validator is not None:
@@ -148,8 +200,8 @@ class Agent:
 
 
 NETWORK_TOOLS = {"fetch_url", "web_search"}
-FAIL_ROUNDS_WARN = 3   # 连续 3 轮工具全失败：提示模型收尾
-FAIL_ROUNDS_STOP = 5   # 连续 5 轮：提前停止，不再耗满 MAX_STEPS
+FAIL_ROUNDS_WARN = 3  # 连续 3 轮工具全失败：提示模型收尾
+FAIL_ROUNDS_STOP = 5  # 连续 5 轮：提前停止，不再耗满 MAX_STEPS
 
 
 def call_key(name: str, raw: str) -> str:
@@ -166,8 +218,10 @@ def call_key(name: str, raw: str) -> str:
 
 
 def dedupe_url(url: str) -> str:
-    from .evidence import canonical_url
     from urllib.parse import urlsplit, urlunsplit
+
+    from .evidence import canonical_url
+
     p = urlsplit(canonical_url(url))
     path = p.path.rstrip("/") or "/"
     return urlunsplit((p.scheme, p.netloc, path, p.query, ""))

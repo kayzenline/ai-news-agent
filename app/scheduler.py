@@ -4,6 +4,7 @@
 误触发宽限只覆盖调度器知道的错过执行；进程停机期间错过的由 catch_up() 在窗口内补一次。
 DST 跳过的本地时刻由补跑扫描在当天恢复后执行；重复时刻靠幂等键只执行一次。
 """
+
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -36,6 +37,7 @@ def sched_key(user_id: int, day: str) -> str:
 
 def _job(user_id: int):
     from .service import submit_run
+
     try:
         with SessionLocal() as s:
             u = s.get(User, user_id)
@@ -48,9 +50,19 @@ def _job(user_id: int):
 
 def schedule_user(user: User):
     hh, mm = (user.send_time or "08:00").split(":")
-    scheduler.add_job(_job, "cron", hour=int(hh), minute=int(mm), args=[user.id], id=f"user_{user.id}",
-                      timezone=user_tz(user), replace_existing=True, misfire_grace_time=3600,
-                      coalesce=True, max_instances=1)
+    scheduler.add_job(
+        _job,
+        "cron",
+        hour=int(hh),
+        minute=int(mm),
+        args=[user.id],
+        id=f"user_{user.id}",
+        timezone=user_tz(user),
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
 
 
 def _first_valid(wall: datetime) -> datetime:
@@ -88,6 +100,7 @@ def due_users(now: datetime | None = None) -> list[tuple[int, str]]:
 
 def catch_up(now: datetime | None = None) -> list[str]:
     from .service import submit_run
+
     started = []
     for uid, day in due_users(now):
         r = submit_run(uid, trigger="scheduled", idempotency_key=sched_key(uid, day), today=day)
@@ -103,7 +116,13 @@ def start():
                 schedule_user(u)
             except ValueError:  # 坏的存量配置只跳过该用户，不阻止整个服务启动
                 log.error("invalid send_time %r for user=%s; job skipped", u.send_time, u.id)
-    scheduler.add_job(catch_up, "interval", minutes=10, id="catch_up", replace_existing=True,
-                      next_run_time=datetime.now(ZoneInfo("UTC")))
+    scheduler.add_job(
+        catch_up,
+        "interval",
+        minutes=10,
+        id="catch_up",
+        replace_existing=True,
+        next_run_time=datetime.now(ZoneInfo("UTC")),
+    )
     if not scheduler.running:
         scheduler.start()

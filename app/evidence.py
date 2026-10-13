@@ -2,6 +2,7 @@
 
 URL、标题、日期、摘录由工具结果产生并由 Service 保存，模型不能在草稿里自己填链接。
 """
+
 import hashlib
 import json
 import re
@@ -37,8 +38,8 @@ class Evidence:
     source: str
     title: str
     url: str
-    published_at: str      # 来源给出的日期；未知为 "unknown"（HN 是提交时间，不等于原文发布时间）
-    retrieved_at: str      # 抓取时间（UTC）
+    published_at: str  # 来源给出的日期；未知为 "unknown"（HN 是提交时间，不等于原文发布时间）
+    retrieved_at: str  # 抓取时间（UTC）
     excerpt: str
     content_hash: str
 
@@ -58,15 +59,23 @@ class EvidenceStore:
         self.items: dict[str, Evidence] = {}
         self.searches: list[SearchRecord] = []
 
-    def record_search(self, query: str, requested: list[str] | None = None,
-                      succeeded: list[str] | None = None,
-                      failed: dict[str, str] | None = None,
-                      items_count: int = 0,
-                      all_failed: bool = False) -> SearchRecord:
-        rec = SearchRecord(query=query, sources_requested=requested or [],
-                           sources_succeeded=succeeded or [],
-                           sources_failed=failed or {},
-                           items_count=items_count, all_failed=all_failed)
+    def record_search(
+        self,
+        query: str,
+        requested: list[str] | None = None,
+        succeeded: list[str] | None = None,
+        failed: dict[str, str] | None = None,
+        items_count: int = 0,
+        all_failed: bool = False,
+    ) -> SearchRecord:
+        rec = SearchRecord(
+            query=query,
+            sources_requested=requested or [],
+            sources_succeeded=succeeded or [],
+            sources_failed=failed or {},
+            items_count=items_count,
+            all_failed=all_failed,
+        )
         self.searches.append(rec)
         return rec
 
@@ -76,10 +85,17 @@ class EvidenceStore:
     def add(self, tool: str, source: str, title: str, url: str, published_at: str = "", excerpt: str = "") -> str:
         eid = f"ev_{len(self.items) + 1:03d}"
         excerpt = (excerpt or "")[:500]
-        self.items[eid] = Evidence(eid, tool, source, (title or "").strip()[:300], url.strip(),
-                                   published_at.strip() or "unknown",
-                                   datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), excerpt,
-                                   hashlib.sha256(f"{url}\n{title}\n{excerpt}".encode()).hexdigest()[:16])
+        self.items[eid] = Evidence(
+            eid,
+            tool,
+            source,
+            (title or "").strip()[:300],
+            url.strip(),
+            published_at.strip() or "unknown",
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            excerpt,
+            hashlib.sha256(f"{url}\n{title}\n{excerpt}".encode()).hexdigest()[:16],
+        )
         return eid
 
     def get(self, eid: str) -> Evidence | None:

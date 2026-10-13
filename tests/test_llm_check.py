@@ -50,7 +50,8 @@ def test_plain_text_reply_does_not_pass_tool_support_check(monkeypatch, capsys):
     monkeypatch.setattr(check.config, "LLM_PROVIDER", "openai")
     client = SimpleNamespace(close=lambda: None)
     client.with_options = lambda **kw: client
-    monkeypatch.setattr(check, "get_provider", lambda: SimpleNamespace(
-        client=client, chat=lambda *a: LLMResponse("OK", [], "end")))
+    monkeypatch.setattr(
+        check, "get_provider", lambda: SimpleNamespace(client=client, chat=lambda *a: LLMResponse("OK", [], "end"))
+    )
     assert check.main() == 1
     assert "未返回预期工具调用" in capsys.readouterr().out

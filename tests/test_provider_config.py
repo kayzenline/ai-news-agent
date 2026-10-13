@@ -18,11 +18,14 @@ def sdk_constructors(monkeypatch):
     return openai, anthropic
 
 
-@pytest.mark.parametrize("provider,variable", [
-    ("openai", "LLM_API_KEY"),
-    ("grok", "XAI_API_KEY"),
-    ("claude", "ANTHROPIC_API_KEY"),
-])
+@pytest.mark.parametrize(
+    "provider,variable",
+    [
+        ("openai", "LLM_API_KEY"),
+        ("grok", "XAI_API_KEY"),
+        ("claude", "ANTHROPIC_API_KEY"),
+    ],
+)
 @pytest.mark.parametrize("key", ["", " \t\n "])
 def test_missing_api_key_explains_local_configuration(monkeypatch, sdk_constructors, provider, variable, key):
     monkeypatch.setattr(config, "LLM_PROVIDER", provider)
@@ -51,12 +54,17 @@ def test_fake_needs_no_credentials_or_url(monkeypatch, sdk_constructors):
         constructor.assert_not_called()
 
 
-@pytest.mark.parametrize("provider,key_variable,url_variable", [
-    ("openai", "LLM_API_KEY", "LLM_BASE_URL"),
-    ("grok", "XAI_API_KEY", "XAI_BASE_URL"),
-])
+@pytest.mark.parametrize(
+    "provider,key_variable,url_variable",
+    [
+        ("openai", "LLM_API_KEY", "LLM_BASE_URL"),
+        ("grok", "XAI_API_KEY", "XAI_BASE_URL"),
+    ],
+)
 @pytest.mark.parametrize("url", ["https://compat.example/v1", "http://localhost:1234/v1", "http://[::1]:1234/v1"])
-def test_compatible_service_preserves_explicit_model(monkeypatch, sdk_constructors, provider, key_variable, url_variable, url):
+def test_compatible_service_preserves_explicit_model(
+    monkeypatch, sdk_constructors, provider, key_variable, url_variable, url
+):
     monkeypatch.setattr(config, "LLM_PROVIDER", provider)
     monkeypatch.setattr(config, key_variable, "arbitrary-test-key")
     monkeypatch.setattr(config, url_variable, url)
@@ -70,15 +78,29 @@ def test_compatible_service_preserves_explicit_model(monkeypatch, sdk_constructo
     sdk_constructors[1].assert_not_called()
 
 
-@pytest.mark.parametrize("provider,key_variable,url_variable", [
-    ("openai", "LLM_API_KEY", "LLM_BASE_URL"),
-    ("grok", "XAI_API_KEY", "XAI_BASE_URL"),
-])
-@pytest.mark.parametrize("url", [
-    "", "   ", "ftp://compat.example/v1", "compat.example/v1", "https:///v1",
-    "https://user:private-password@compat.example/v1", "http://localhost:abc/v1", "http://[",
-])
-def test_invalid_base_url_fails_before_sdk_without_echoing_credentials(monkeypatch, sdk_constructors, provider, key_variable, url_variable, url):
+@pytest.mark.parametrize(
+    "provider,key_variable,url_variable",
+    [
+        ("openai", "LLM_API_KEY", "LLM_BASE_URL"),
+        ("grok", "XAI_API_KEY", "XAI_BASE_URL"),
+    ],
+)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        "   ",
+        "ftp://compat.example/v1",
+        "compat.example/v1",
+        "https:///v1",
+        "https://user:private-password@compat.example/v1",
+        "http://localhost:abc/v1",
+        "http://[",
+    ],
+)
+def test_invalid_base_url_fails_before_sdk_without_echoing_credentials(
+    monkeypatch, sdk_constructors, provider, key_variable, url_variable, url
+):
     monkeypatch.setattr(config, "LLM_PROVIDER", provider)
     monkeypatch.setattr(config, key_variable, "private-api-key")
     monkeypatch.setattr(config, url_variable, url)
@@ -108,12 +130,15 @@ def test_claude_configuration_is_passed_to_sdk(monkeypatch, sdk_constructors):
     sdk_constructors[0].assert_not_called()
 
 
-@pytest.mark.parametrize("url,expected", [
-    ("https://api.deepseek.com", {"extra_body": {"thinking": {"type": "disabled"}}}),
-    ("https://api.deepseek.com/v1", {"extra_body": {"thinking": {"type": "disabled"}}}),
-    ("https://api.openai.com/v1", {}),
-    ("https://compat.example/v1", {}),
-])
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://api.deepseek.com", {"extra_body": {"thinking": {"type": "disabled"}}}),
+        ("https://api.deepseek.com/v1", {"extra_body": {"thinking": {"type": "disabled"}}}),
+        ("https://api.openai.com/v1", {}),
+        ("https://compat.example/v1", {}),
+    ],
+)
 def test_deepseek_non_thinking_option_is_scoped_to_official_endpoint(monkeypatch, sdk_constructors, url, expected):
     monkeypatch.setattr(config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(config, "LLM_API_KEY", "arbitrary-test-key")
@@ -123,7 +148,8 @@ def test_deepseek_non_thinking_option_is_scoped_to_official_endpoint(monkeypatch
     create = provider.client.chat.completions.create
     create.return_value = SimpleNamespace(
         choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="OK", tool_calls=[]))],
-        usage=SimpleNamespace(prompt_tokens=3, completion_tokens=1))
+        usage=SimpleNamespace(prompt_tokens=3, completion_tokens=1),
+    )
 
     result = provider.chat([{"role": "user", "content": "Hello"}], [])
 

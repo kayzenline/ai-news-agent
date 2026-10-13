@@ -1,7 +1,8 @@
 """SQLite + SQLAlchemy：users / briefs 两张表，启动时 create_all（轻量 migration）。"""
+
 from datetime import datetime
 
-from sqlalchemy import JSON, UniqueConstraint, DateTime, ForeignKey, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from . import config
@@ -20,7 +21,9 @@ class User(Base):
     keywords: Mapped[list] = mapped_column(JSON, default=list)
     language: Mapped[str] = mapped_column(String(10), default="zh")
     send_time: Mapped[str] = mapped_column(String(5), default="08:00")  # HH:MM，用户时区内的“每日开始生成时间”
-    timezone: Mapped[str] = mapped_column(String(64), default=lambda: config.DEFAULT_TIMEZONE)  # IANA，如 Australia/Sydney
+    timezone: Mapped[str] = mapped_column(
+        String(64), default=lambda: config.DEFAULT_TIMEZONE
+    )  # IANA，如 Australia/Sydney
     email_enabled: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
@@ -43,6 +46,7 @@ class Brief(Base):
 
 class Delivery(Base):
     """投递与生成解耦：一份简报每个渠道/收件人一条记录，失败只重发原正文，不重跑模型。"""
+
     __tablename__ = "deliveries"
     __table_args__ = (UniqueConstraint("brief_id", "channel", "recipient"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -59,6 +63,7 @@ class Delivery(Base):
 
 class Run(Base):
     """请求受理即入库：queued -> running -> succeeded | no_news | failed | interrupted。失败与中断也可见。"""
+
     __tablename__ = "runs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[str] = mapped_column(String(40), unique=True)
@@ -98,4 +103,4 @@ def _add_missing_columns(engine):
                     ddl = col.type.compile(engine.dialect)
                     default = col.default.arg if col.default is not None and col.default.is_scalar else None
                     extra = f" DEFAULT {default!r}" if default is not None else ""
-                    conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}{extra}'))
+                    conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}{extra}"))

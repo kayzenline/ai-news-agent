@@ -1,7 +1,8 @@
 """业务层：同步用户画像到工作区文件 -> 跑 Agent -> 记录简报索引与 trace -> 可选邮件推送。"""
+
 import json
-import smtplib
 import logging
+import smtplib
 import threading
 import time
 import uuid
@@ -12,8 +13,8 @@ from email.mime.text import MIMEText
 from . import config
 from .agent import Agent, dump_trace
 from .brief import history_urls, render_markdown, validate_draft
-from .evidence import EvidenceStore
 from .db import Brief, Delivery, Run, SessionLocal, User
+from .evidence import EvidenceStore
 from .llm.providers import get_provider
 from .tools.registry import ToolRegistry
 from .tools.sandbox import Sandbox
@@ -37,8 +38,9 @@ def new_run_id() -> str:
     return f"{time.strftime('%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
 
-def submit_run(user_id: int, trigger: str = "manual", idempotency_key: str | None = None,
-               llm=None, today: str | None = None) -> Run:
+def submit_run(
+    user_id: int, trigger: str = "manual", idempotency_key: str | None = None, llm=None, today: str | None = None
+) -> Run:
     """统一受理：先持久化 run，再交给有界执行池。同用户已有活动 run 或幂等键已存在时返回已有 run。"""
     with _submit_lock, SessionLocal() as s:
         if s.get(User, user_id) is None:
@@ -78,8 +80,13 @@ def _execute(run_pk: int, llm=None, today=None):
     try:
         b = run_for_user(user_id, llm=llm, today=today, run_id=run_id)
         status = {"ok": "succeeded", "no_news": "no_news"}.get(b.status, "failed")
-        _set(run_pk, status=status, brief_id=b.id, finished_at=datetime.now(),
-             error="" if status != "failed" and b.stopped_reason != "max_steps" else b.stopped_reason)
+        _set(
+            run_pk,
+            status=status,
+            brief_id=b.id,
+            finished_at=datetime.now(),
+            error="" if status != "failed" and b.stopped_reason != "max_steps" else b.stopped_reason,
+        )
     except Exception as e:  # 初始化/锁/DB 等任何异常都落到 run 终态，不只写日志
         log.exception("run %s failed", run_id)
         _set(run_pk, status="failed", error=f"{type(e).__name__}: {e}"[:500], finished_at=datetime.now())
@@ -109,9 +116,19 @@ def workspace(user_id: int) -> Sandbox:
 def sync_profile(user: User) -> Sandbox:
     sb = workspace(user.id)
     (sb.root / "briefs").mkdir(exist_ok=True)
-    (sb.root / "profile.json").write_text(json.dumps({
-        "name": user.name, "topics": user.topics, "keywords": user.keywords, "language": user.language,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    (sb.root / "profile.json").write_text(
+        json.dumps(
+            {
+                "name": user.name,
+                "topics": user.topics,
+                "keywords": user.keywords,
+                "language": user.language,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return sb
 
 
@@ -124,6 +141,7 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
             user = s.get(User, user_id)
             sb = sync_profile(user)
             from .scheduler import business_date
+
             today = today or business_date(user)  # 业务日期按用户时区，而不是宿主机时区
             run_id = run_id or new_run_id()
             # 模型只能写本轮 staging；画像、briefs/ 历史、runs/ 发布目录对模型只读，只有 Service 发布
@@ -136,8 +154,9 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
             started = time.time()
             draft = sb.root / rel
             # 已发布历史的规范 URL 由 Service 读取，用于强制去重（不依赖模型自觉）
-            published = history_urls(f.read_text(encoding="utf-8", errors="ignore")
-                                     for f in (sb.root / "briefs").rglob("*.md"))
+            published = history_urls(
+                f.read_text(encoding="utf-8", errors="ignore") for f in (sb.root / "briefs").rglob("*.md")
+            )
             checked: dict = {}
 
             def validator(r):
@@ -147,11 +166,17 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
                 checked["draft"] = d
                 return errs
 
-            res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today, output=rel,
-                            validator=validator)
-            draft_valid = (checked.get("draft") is not None
-                           and _wrote_this_run(res.trace, rel, draft, started)
-                           and not getattr(res, "validation_errors", None))
+            res = agent.run(
+                f"Please prepare today's AI news brief for user {user.name}.",
+                today=today,
+                output=rel,
+                validator=validator,
+            )
+            draft_valid = (
+                checked.get("draft") is not None
+                and _wrote_this_run(res.trace, rel, draft, started)
+                and not getattr(res, "validation_errors", None)
+            )
             ok = res.stopped_reason in ("model_finished", "max_steps") and draft_valid
             path = sb.root / "runs" / today / f"{run_id}.md"
             status = "failed"
@@ -161,11 +186,23 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
                 if items:
                     # Service 渲染正文：链接只来自证据库，模型文本转义
                     md = sb.root / staging / "brief.md"
-                    md.write_text(render_markdown(d, store, user.name, today, user.language,
-                                                  stopped_reason=res.stopped_reason, steps=res.steps), encoding="utf-8")
+                    md.write_text(
+                        render_markdown(
+                            d,
+                            store,
+                            user.name,
+                            today,
+                            user.language,
+                            stopped_reason=res.stopped_reason,
+                            steps=res.steps,
+                        ),
+                        encoding="utf-8",
+                    )
                     path = publish(sb, md, today, run_id)
-                    for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
-                                         (".evidence.json", store.to_json())):
+                    for suffix, body in (
+                        (".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
+                        (".evidence.json", store.to_json()),
+                    ):
                         (path.parent / f"{run_id}{suffix}").write_text(body, encoding="utf-8")
                     status = "ok"
                 else:
@@ -175,24 +212,49 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
                         res.stopped_reason = "insufficient_search"
                     else:
                         md = sb.root / staging / "brief.md"
-                        md.write_text(render_markdown(d, store, user.name, today, user.language,
-                                                      stopped_reason=res.stopped_reason, steps=res.steps), encoding="utf-8")
+                        md.write_text(
+                            render_markdown(
+                                d,
+                                store,
+                                user.name,
+                                today,
+                                user.language,
+                                stopped_reason=res.stopped_reason,
+                                steps=res.steps,
+                            ),
+                            encoding="utf-8",
+                        )
                         path = publish(sb, md, today, run_id)
-                        for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
-                                             (".evidence.json", store.to_json())):
+                        for suffix, body in (
+                            (".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
+                            (".evidence.json", store.to_json()),
+                        ):
                             (path.parent / f"{run_id}{suffix}").write_text(body, encoding="utf-8")
                         status = "no_news"
-            b = Brief(user_id=user.id, date=today, path=str(path), status=status,
-                      stopped_reason=res.stopped_reason, steps=res.steps, tokens_in=res.usage["input"],
-                      tokens_out=res.usage["output"], trace_json=dump_trace(res.trace), run_id=run_id)
+            b = Brief(
+                user_id=user.id,
+                date=today,
+                path=str(path),
+                status=status,
+                stopped_reason=res.stopped_reason,
+                steps=res.steps,
+                tokens_in=res.usage["input"],
+                tokens_out=res.usage["output"],
+                trace_json=dump_trace(res.trace),
+                run_id=run_id,
+            )
             s.add(b)
             s.flush()
             d = None
             if status == "ok" and user.email_enabled:
                 # 简报与待发送记录在同一事务提交；提交后才投递
-                d = Delivery(brief_id=b.id, channel="email", recipient=user.email,
-                             status="pending" if config.SMTP["enabled"] else "not_configured",
-                             message_id=f"<brief-{b.id}-{run_id}@ai-news-agent>")
+                d = Delivery(
+                    brief_id=b.id,
+                    channel="email",
+                    recipient=user.email,
+                    status="pending" if config.SMTP["enabled"] else "not_configured",
+                    message_id=f"<brief-{b.id}-{run_id}@ai-news-agent>",
+                )
                 if not config.SMTP["enabled"]:
                     d.last_error = "SMTP_ENABLED=0: email is on for this user but the server has no SMTP configured"
                 s.add(d)
@@ -219,11 +281,19 @@ def publish(sb: Sandbox, src, today: str, run_id: str):
 
 def _wrote_this_run(trace, rel: str, path, started: float) -> bool:
     """本次运行必须成功调用 write_file 写入自己的输出文件，且文件非空、在本次开始后修改。"""
-    wrote = any(t.get("type") == "tool" and t.get("name") == "write_file" and t.get("ok")
-                and json.loads(t.get("arguments") or "{}").get("path", "").lstrip("/").lstrip("./") == rel
-                for t in trace)
-    return (wrote and path.is_file() and path.stat().st_mtime >= started - 1
-            and path.read_text(encoding="utf-8").strip() != "")
+    wrote = any(
+        t.get("type") == "tool"
+        and t.get("name") == "write_file"
+        and t.get("ok")
+        and json.loads(t.get("arguments") or "{}").get("path", "").lstrip("/").lstrip("./") == rel
+        for t in trace
+    )
+    return (
+        wrote
+        and path.is_file()
+        and path.stat().st_mtime >= started - 1
+        and path.read_text(encoding="utf-8").strip() != ""
+    )
 
 
 def deliver(delivery_id: int) -> Delivery:
@@ -241,12 +311,10 @@ def deliver(delivery_id: int) -> Delivery:
 
         # 原子条件更新领取任务：仅允许从 pending / failed / unknown 抢占为 sending
         # 防止并发重试或与当前生成线程并发重复发信
-        claimed = s.query(Delivery).filter(
-            Delivery.id == delivery_id,
-            Delivery.status.in_(["pending", "failed", "unknown"])
-        ).update(
-            {Delivery.status: "sending", Delivery.attempts: Delivery.attempts + 1},
-            synchronize_session=False
+        claimed = (
+            s.query(Delivery)
+            .filter(Delivery.id == delivery_id, Delivery.status.in_(["pending", "failed", "unknown"]))
+            .update({Delivery.status: "sending", Delivery.attempts: Delivery.attempts + 1}, synchronize_session=False)
         )
         s.commit()
         if not claimed:
@@ -256,8 +324,10 @@ def deliver(delivery_id: int) -> Delivery:
         b = s.get(Brief, d.brief_id)
         try:
             from pathlib import Path
-            send_email(d.recipient, f"AI 新闻简报 {b.date}", Path(b.path).read_text(encoding="utf-8"),
-                       message_id=d.message_id)
+
+            send_email(
+                d.recipient, f"AI 新闻简报 {b.date}", Path(b.path).read_text(encoding="utf-8"), message_id=d.message_id
+            )
             d.status, d.last_error = "sent", ""
         except Exception as e:
             d.status, d.last_error = "failed", f"{type(e).__name__}: {e}"[:500]

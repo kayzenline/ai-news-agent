@@ -5,6 +5,7 @@ draft.json 示例（字段含义见 docs/DESIGN.md §4）：
  "items": [{"title": "...", "topic": "...", "summary": "...", "why_it_matters": "...",
             "evidence_ids": ["ev_001"], "event_id": null, "change_type": "new", "delta": null}]}
 """
+
 import json
 import re
 
@@ -93,15 +94,29 @@ def validate_draft(raw: str, store: EvidenceStore, published: set[str] | None = 
                 errors.append(f"{p}: same source as items[{seen_urls[u]}] ({u}); merge them")
             seen_urls.setdefault(u, i)
         if ct != "update" and urls and urls <= published:
-            errors.append(f"{p}: already published in a previous brief; drop it or mark change_type=update with a delta")
+            errors.append(
+                f"{p}: already published in a previous brief; drop it or mark change_type=update with a delta"
+            )
     return (d if not errors else None), errors
 
 
 L10N = {
-    "zh": {"title": "{name} 的 AI 新闻简报 · {date}", "why": "推荐理由", "src": "来源", "unknown": "日期未知",
-           "update": "更新", "empty": "今日没有新的相关内容。"},
-    "en": {"title": "{name}'s AI news brief · {date}", "why": "Why it matters", "src": "Sources", "unknown": "date unknown",
-           "update": "Update", "empty": "Nothing new and relevant today."},
+    "zh": {
+        "title": "{name} 的 AI 新闻简报 · {date}",
+        "why": "推荐理由",
+        "src": "来源",
+        "unknown": "日期未知",
+        "update": "更新",
+        "empty": "今日没有新的相关内容。",
+    },
+    "en": {
+        "title": "{name}'s AI news brief · {date}",
+        "why": "Why it matters",
+        "src": "Sources",
+        "unknown": "date unknown",
+        "update": "Update",
+        "empty": "Nothing new and relevant today.",
+    },
 }
 
 
@@ -110,8 +125,15 @@ def _md_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render_markdown(draft: dict, store: EvidenceStore, name: str, date: str, language: str = "zh",
-                    stopped_reason: str | None = None, steps: int | None = None) -> str:
+def render_markdown(
+    draft: dict,
+    store: EvidenceStore,
+    name: str,
+    date: str,
+    language: str = "zh",
+    stopped_reason: str | None = None,
+    steps: int | None = None,
+) -> str:
     """Service 侧统一渲染：模型文本一律转义，链接只来自证据库。"""
     t = L10N.get(language, L10N["zh"])
     out = [f"# {_md_escape(t['title'].format(name=name, date=date))}", ""]
