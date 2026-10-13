@@ -43,9 +43,35 @@ class Evidence:
     content_hash: str
 
 
+@dataclass
+class SearchRecord:
+    query: str
+    sources_requested: list[str]
+    sources_succeeded: list[str]
+    sources_failed: dict[str, str]
+    items_count: int
+    all_failed: bool
+
+
 class EvidenceStore:
     def __init__(self):
         self.items: dict[str, Evidence] = {}
+        self.searches: list[SearchRecord] = []
+
+    def record_search(self, query: str, requested: list[str] | None = None,
+                      succeeded: list[str] | None = None,
+                      failed: dict[str, str] | None = None,
+                      items_count: int = 0,
+                      all_failed: bool = False) -> SearchRecord:
+        rec = SearchRecord(query=query, sources_requested=requested or [],
+                           sources_succeeded=succeeded or [],
+                           sources_failed=failed or {},
+                           items_count=items_count, all_failed=all_failed)
+        self.searches.append(rec)
+        return rec
+
+    def has_successful_search(self) -> bool:
+        return any(len(s.sources_succeeded) > 0 for s in self.searches)
 
     def add(self, tool: str, source: str, title: str, url: str, published_at: str = "", excerpt: str = "") -> str:
         eid = f"ev_{len(self.items) + 1:03d}"

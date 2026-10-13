@@ -461,3 +461,65 @@ def test_revision_loop_fixes_draft(tmp_path, monkeypatch):
     b = service.run_for_user(uid, llm=FakeProvider(model), today="2026-10-11")
     assert b.status == "ok" and state["writes"] == 2
     assert "unknown evidence ids" in b.trace_json
+
+
+def test_zero_search_empty_draft_is_marked_failed(tmp_path, monkeypatch):
+    """Zero searches before writing an empty draft must be marked failed, not no_news."""
+    from app.llm.providers import FakeProvider
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    b = service.run_for_user(uid, llm=FakeProvider(_always_writer(D())), today="2026-10-11")
+    assert b.status == "failed" and b.stopped_reason == "insufficient_search"
+    assert sent == []
+
+
+def test_all_sources_failed_returns_false_and_cannot_be_no_news(tmp_path, monkeypatch):
+    """When all search sources fail, tool returns ok=False and empty draft cannot be no_news."""
+    from app.tools import news_tools
+    from app.llm.providers import FakeProvider
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "errors: hn: HTTP 500; rss: timeout; arxiv: down")
+    b = service.run_for_user(uid, llm=FakeProvider(_writer(D())), today="2026-10-11")
+    assert b.status == "failed" and b.stopped_reason == "insufficient_search"
+    assert "ERROR: all search sources failed" in b.trace_json
+    assert sent == []
+
+
+def test_successful_search_with_no_hits_allows_valid_no_news(tmp_path, monkeypatch):
+    """When search succeeds without errors but returns no items, empty draft is legitimately no_news."""
+    from app.tools import news_tools
+    from app.llm.providers import FakeProvider
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(news_tools, "web_search", lambda query, **k: "no results")
+    b = service.run_for_user(uid, llm=FakeProvider(_writer(D())), today="2026-10-11")
+    assert b.status == "no_news" and sent == []
+
+
+def test_concurrent_deliver_claims_atomically(tmp_path, monkeypatch):
+    """Concurrent delivery claims must be atomic: only one thread sends email, preventing duplicates."""
+    import threading
+    import time
+    from app.db import Brief, Delivery, SessionLocal
+    service, uid, _ = _setup(tmp_path, monkeypatch)
+    with SessionLocal() as s:
+        b = Brief(user_id=uid, date="2026-10-11", path=str(tmp_path / "b.md"), status="ok")
+        s.add(b); s.flush()
+        d = Delivery(brief_id=b.id, recipient="e@x.com", status="pending")
+        s.add(d); s.commit()
+        did = d.id
+    (tmp_path / "b.md").write_text("news body")
+
+    sent_calls = []
+    def slow_send(to, subject, body, **k):
+        time.sleep(0.05)
+        sent_calls.append(body)
+    monkeypatch.setattr(service, "send_email", slow_send)
+
+    t1 = threading.Thread(target=lambda: service.deliver(did))
+    t2 = threading.Thread(target=lambda: service.deliver(did))
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+    assert len(sent_calls) == 1
+    with SessionLocal() as s:
+        res_d = s.get(Delivery, did)
+        assert res_d.status == "sent" and res_d.attempts == 1

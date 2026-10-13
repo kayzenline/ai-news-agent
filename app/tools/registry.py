@@ -68,11 +68,37 @@ class ToolRegistry:
         except (json.JSONDecodeError, ValueError) as e:
             return False, f"ERROR: invalid JSON arguments: {e}"
         try:
-            out = str(self.impl[name](**args))
+            raw_out = self.impl[name](**args)
+            out = str(raw_out)
         except TypeError as e:
             return False, f"ERROR: bad arguments for {name}: {e}"
         except Exception as e:
             return False, f"ERROR: {type(e).__name__}: {e}"
+        if name == "web_search":
+            from .news_tools import SearchResult
+            if isinstance(raw_out, SearchResult):
+                all_failed = raw_out.all_failed
+                requested = raw_out.sources_requested
+                succeeded = raw_out.sources_succeeded
+                failed = raw_out.sources_failed
+                results_count = raw_out.results_count
+            else:
+                lines = [l.strip() for l in out.splitlines() if l.strip()]
+                results_count = sum(1 for l in lines if l.startswith("- ") and " | " in l)
+                has_errors = any(l.startswith("errors:") for l in lines) or out.startswith("errors:")
+                all_failed = (results_count == 0 and has_errors)
+                requested = args.get("sources") or ["hackernews", "rss", "arxiv"]
+                succeeded = [s for s in requested] if (results_count > 0 or not has_errors) else []
+                failed = {"all": out} if all_failed else {}
+
+            if self.evidence is not None:
+                self.evidence.record_search(
+                    str(args.get("query", "")), requested=requested, succeeded=succeeded,
+                    failed=failed, items_count=results_count, all_failed=all_failed
+                )
+            if all_failed:
+                return False, f"ERROR: all search sources failed ({out})"
+
         if self.evidence is not None:
             if name == "web_search":
                 out = self.evidence.annotate_search(out)

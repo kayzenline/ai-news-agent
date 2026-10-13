@@ -149,34 +149,67 @@ def _tavily(query: str, days: int) -> list[dict]:
     return out
 
 
-def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> str:
+class SearchResult(str):
+    """带来源健康账本的搜索文本返回对象（继承 str，完全兼容字符串接口）。"""
+    def __new__(cls, text: str, requested: list[str] | None = None,
+                succeeded: list[str] | None = None,
+                failed: dict[str, str] | None = None,
+                results_count: int = 0):
+        obj = super().__new__(cls, text)
+        obj.sources_requested = requested or []
+        obj.sources_succeeded = succeeded or []
+        obj.sources_failed = failed or {}
+        obj.results_count = results_count
+        obj.all_failed = (len(obj.sources_succeeded) == 0 and len(obj.sources_failed) > 0)
+        return obj
+
+
+def web_search(query: str, sources: list[str] | None = None, days: int = 2) -> SearchResult:
     sources = sources or (["tavily"] if config.TAVILY_API_KEY else ["hackernews", "rss", "arxiv"])
     fns = {"hackernews": lambda: _hn(query, days), "arxiv": lambda: _arxiv(query, days), "rss": lambda: _rss(query, days),
            "tavily": lambda: _tavily(query, days)}
     results, errors, notes = [], [], []
+    succeeded, failed = [], {}
     fns["rss"] = lambda: _rss(query, days, errors, notes)
     for s in sources:
         if s not in fns:
-            errors.append(f"unknown source {s}")
+            err = f"unknown source {s}"
+            errors.append(err)
+            failed[s] = err
             continue
         if s == "tavily" and not config.TAVILY_API_KEY:
             notes.append("tavily: not configured on this server, skipped (use hackernews/rss/arxiv)")
             continue
+        rss_err_idx = len(errors)
         try:
-            results.extend(fns[s]())
+            r = fns[s]()
+            results.extend(r)
+            if s == "rss":
+                # RSS 内部循环多个 feed；如果所有 feed 均报错且未产生条目，视为该源失败
+                if len(errors) > rss_err_idx and not any(x.get("source") in RSS_FEEDS for x in r):
+                    failed[s] = "; ".join(errors[rss_err_idx:])
+                else:
+                    succeeded.append(s)
+            else:
+                succeeded.append(s)
         except httpx.HTTPStatusError as e:  # 简短说明，不回显响应正文
             code = e.response.status_code
             hint = " (check TAVILY_API_KEY)" if s == "tavily" and code in (401, 403) else ""
-            errors.append(f"{s}: HTTP {code}{hint}")
+            msg = f"HTTP {code}{hint}"
+            errors.append(f"{s}: {msg}")
+            failed[s] = msg
         except Exception as e:  # 单个来源失败不影响其它来源，错误回传给模型
-            errors.append(f"{s}: {type(e).__name__}: {e}")
+            msg = f"{type(e).__name__}: {e}"
+            errors.append(f"{s}: {msg}")
+            failed[s] = msg
     lines = [f"- [{x['source']}] {x['title']} | {x['url']} | {x.get('date','')}" + (f" | {x['summary']}" if x.get("summary") else "")
              for x in results]
     if notes:
         lines.append("notes: " + "; ".join(notes))
     if errors:
         lines.append("errors: " + "; ".join(errors))
-    return "\n".join(lines) or "no results"
+    text = "\n".join(lines) or "no results"
+    return SearchResult(text, requested=list(sources), succeeded=succeeded, failed=failed, results_count=len(results))
 
 
 MAX_FETCH_BYTES = 2_000_000

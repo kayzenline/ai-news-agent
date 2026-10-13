@@ -155,15 +155,29 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
             status = "failed"
             if ok:
                 d = checked["draft"]
-                # Service 渲染正文：链接只来自证据库，模型文本转义
-                md = sb.root / staging / "brief.md"
-                md.write_text(render_markdown(d, store, user.name, today, user.language), encoding="utf-8")
-                path = publish(sb, md, today, run_id)
-                for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
-                                     (".evidence.json", store.to_json())):
-                    (path.parent / f"{run_id}{suffix}").write_text(body, encoding="utf-8")
-                # 0 条合格条目 => no_news（检索正常但没有值得发的内容），不凑数、不发邮件
-                status = "ok" if d["items"] else "no_news"
+                items = d.get("items") or []
+                if items:
+                    # Service 渲染正文：链接只来自证据库，模型文本转义
+                    md = sb.root / staging / "brief.md"
+                    md.write_text(render_markdown(d, store, user.name, today, user.language), encoding="utf-8")
+                    path = publish(sb, md, today, run_id)
+                    for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
+                                         (".evidence.json", store.to_json())):
+                        (path.parent / f"{run_id}{suffix}").write_text(body, encoding="utf-8")
+                    status = "ok"
+                else:
+                    # 0 条项目：禁止在零成功检索证据的前提下判定 no_news（未检索或全源失败不能算无新闻）
+                    if not store.has_successful_search():
+                        status = "failed"
+                        res.stopped_reason = "insufficient_search"
+                    else:
+                        md = sb.root / staging / "brief.md"
+                        md.write_text(render_markdown(d, store, user.name, today, user.language), encoding="utf-8")
+                        path = publish(sb, md, today, run_id)
+                        for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
+                                             (".evidence.json", store.to_json())):
+                            (path.parent / f"{run_id}{suffix}").write_text(body, encoding="utf-8")
+                        status = "no_news"
             b = Brief(user_id=user.id, date=today, path=str(path), status=status,
                       stopped_reason=res.stopped_reason, steps=res.steps, tokens_in=res.usage["input"],
                       tokens_out=res.usage["output"], trace_json=dump_trace(res.trace), run_id=run_id)
@@ -220,9 +234,22 @@ def deliver(delivery_id: int) -> Delivery:
             d.status, d.last_error = "not_configured", "SMTP_ENABLED=0"
             s.commit()
             return d
-        b = s.get(Brief, d.brief_id)
-        d.status, d.attempts = "sending", d.attempts + 1
+
+        # 原子条件更新领取任务：仅允许从 pending / failed / unknown 抢占为 sending
+        # 防止并发重试或与当前生成线程并发重复发信
+        claimed = s.query(Delivery).filter(
+            Delivery.id == delivery_id,
+            Delivery.status.in_(["pending", "failed", "unknown"])
+        ).update(
+            {Delivery.status: "sending", Delivery.attempts: Delivery.attempts + 1},
+            synchronize_session=False
+        )
         s.commit()
+        if not claimed:
+            return s.get(Delivery, delivery_id)
+
+        s.refresh(d)
+        b = s.get(Brief, d.brief_id)
         try:
             from pathlib import Path
             send_email(d.recipient, f"AI 新闻简报 {b.date}", Path(b.path).read_text(encoding="utf-8"),
