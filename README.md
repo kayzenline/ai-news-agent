@@ -2,17 +2,19 @@
 
 跨赴科技 Agent 开发实习生笔试 · 选项 A。Python 实现，Agent 循环手写：调用哪个工具、调几次、什么时候停，都由 LLM 自己决定，代码里没有写死的线性流程。按用户的订阅偏好（话题、关键词）每天整理 AI 新闻简报，保存到历史记录，邮件推送可选。
 
-详细设计报告见 [docs/DESIGN.md](docs/DESIGN.md)，2026-10-12 设计评审见 [docs/DESIGN_REVIEW.md](docs/DESIGN_REVIEW.md)。
+详细设计报告见 [docs/DESIGN.md](docs/DESIGN.md)，设计评审见 [docs/DESIGN_REVIEW.md](docs/DESIGN_REVIEW.md)。
+
+需要 **Python 3.11 或以上**。CI 在 3.11 和 3.12 上跑测试，Ruff 的 `target-version` 是 `py311`。本机最近一次 `make ci` 使用 Python 3.14。
 
 ## 5 分钟快速开始
 
 ```bash
-git clone <repo> && cd ai-news-agent
+git clone https://github.com/kayzenline/ai-news-agent.git && cd ai-news-agent
 cp .env.example .env            # 填一个 provider 的 key（见下表）；不填 key 也可以用 fake 模式演示
 ./run.sh                        # 自动建 venv、装依赖、启动 http://127.0.0.1:8000（HOST 可改，默认只监听本机）
 ```
 
-不想配 key：`LLM_PROVIDER=fake ./run.sh` 用脚本化“假模型”代替真实 LLM（读画像 → 列历史 → 搜 HN → 去重 → 写简报）。注意它**只免模型 API，不是全离线**：`web_search` 仍会真实请求 Hacker News；测试里替换了搜索工具才做到离线。脚本顺序是写死的，不能用来证明模型自主性。“5 分钟启动”尚未在干净环境复验，依赖也未锁版本。
+不想配 key：`LLM_PROVIDER=fake ./run.sh` 用脚本化“假模型”代替真实 LLM（读画像 → 列历史 → 搜 HN → 去重 → 写简报）。它**只免模型 API，不是全离线**：`web_search` 仍会真实请求 Hacker News；测试里替换了搜索工具才做到离线。脚本顺序是写死的，不能用来证明模型自主性。“5 分钟启动”尚未在干净环境复验，依赖也未锁版本。
 
 打开 http://127.0.0.1:8000 → 填昵称和邮箱 → 设置话题、关键词、时区、每日开始生成时间 → 点「立即生成今日简报」→ 页面自动显示运行状态和完成结果，无需刷新 → 查看简报、投递状态和 Agent trace。
 
@@ -25,7 +27,7 @@ cp .env.example .env            # 填一个 provider 的 key（见下表）；�
 | `grok` | `XAI_API_KEY`，`LLM_MODEL`（如 `grok-4`） | xAI，OpenAI 兼容接口 `https://api.x.ai/v1`，用 `openai` SDK |
 | `claude` | `ANTHROPIC_API_KEY`，`LLM_MODEL`（如 `claude-sonnet-4-5`） | Anthropic Messages API，原生 `tool_use`/`tool_result`，用 `anthropic` SDK |
 | `openai` | `LLM_API_KEY`，`LLM_BASE_URL`，`LLM_MODEL` | 任意 OpenAI 兼容接口：OpenAI / DeepSeek / Kimi |
-| `fake` | 无 | 离线演示 / 测试 |
+| `fake` | 无模型密钥 | 免模型 API，不是全离线：`web_search` 仍请求 Hacker News；测试里替换搜索工具才离线 |
 
 ### 使用 OpenAI 兼容服务做真实测试
 
@@ -103,3 +105,7 @@ tests/                沙箱逃逸、Agent 循环（假 LLM）、适配层转换
 - **去重**：模型用 `search_content` 拿 URL 或标题去 `briefs/`（完整的追加式历史）里查，命中了就丢掉。只做字面匹配；同一事件换 URL 的识别（事件更新雷达）是下一阶段。
 - **成本控制**：工具输出截断到 6000 字符、`read_file` 最多 2 万字符，搜索结果只返回标题、链接、日期这几行，prompt 里建议 4 到 10 次调用，每次运行记录 token 用量。
 - **失败处理**：工具异常转成 `ERROR: ...` 回传给模型，让它自己纠正；单个新闻来源（包括单个 RSS feed）失败会写进结果的 `errors:` 行；推送失败只影响投递状态；每个用户同一时间只跑一个任务。
+
+## 许可
+
+代码以 [MIT License](LICENSE) 授权。仓库可以公开浏览，并不自动允许他人使用、修改或再分发；这些权利以 `LICENSE` 为准。
