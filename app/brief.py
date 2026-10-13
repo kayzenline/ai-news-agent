@@ -110,10 +110,18 @@ def _md_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render_markdown(draft: dict, store: EvidenceStore, name: str, date: str, language: str = "zh") -> str:
+def render_markdown(draft: dict, store: EvidenceStore, name: str, date: str, language: str = "zh",
+                    stopped_reason: str | None = None, steps: int | None = None) -> str:
     """Service 侧统一渲染：模型文本一律转义，链接只来自证据库。"""
     t = L10N.get(language, L10N["zh"])
     out = [f"# {_md_escape(t['title'].format(name=name, date=date))}", ""]
+    if stopped_reason == "max_steps":
+        step_str = f"（{steps} 步）" if steps else ""
+        if language == "zh":
+            warn = f"> ⚠️ **运行提示**：Agent 在达到最大步数上限{step_str}时自动截断，本简报为阶段性草稿。如需更深度的调研，可提高步数上限（在 `.env` 中调大 `AGENT_MAX_STEPS`）重新生成。"
+        else:
+            warn = f"> ⚠️ **Notice**: Agent stopped upon reaching the step limit{step_str}; this brief is generated from the intermediate draft. To enable deeper exploration, increase `AGENT_MAX_STEPS` in `.env` and rerun."
+        out.extend([warn, ""])
     items = draft.get("items") or []
     if not items:
         out.append(t["empty"])

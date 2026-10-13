@@ -139,10 +139,25 @@ def test_total_tool_call_budget(tmp_path):
     assert sum("budget" in o for o in outs) == len(outs) - 5
 
 
-def test_run_deadline(tmp_path):
+def test_run_deadline(tmp_path, monkeypatch):
+    import app.agent as agent_mod
+    # Step-start check fires before any tool call. today= skips date.today(), which also calls time.time().
     _, agent = make(tmp_path, lambda m: tc(len(m), "list_dir", path=f"{len(m)}"))
-    agent.deadline_s = 1e-9
-    r = agent.run("go")
+    agent.deadline_s = 1
+    times = iter([0.0, 10.0])
+    monkeypatch.setattr(agent_mod.time, "time", lambda: next(times, 10.0))
+    r = agent.run("go", today="2026-10-11")
+    assert r.stopped_reason == "deadline"
+    assert not any(t["type"] == "tool" for t in r.trace)
+
+    # The step check still passes; the per-tool check is what trips.
+    agent = Agent(FakeProvider(lambda m: tc(len(m), "list_dir", path=f"{len(m)}")), agent.tools)
+    agent.deadline_s = 1
+    seq = iter([0.0, 0.5, 0.6, 5.0])
+    monkeypatch.setattr(agent_mod.time, "time", lambda: next(seq, 5.0))
+    r = agent.run("go", today="2026-10-11")
+    outs = [t["output"] for t in r.trace if t["type"] == "tool"]
+    assert outs[0].startswith("ERROR: run deadline exceeded")
     assert r.stopped_reason == "deadline"
 
 

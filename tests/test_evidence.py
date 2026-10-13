@@ -25,6 +25,15 @@ def test_failed_tool_call_assigns_no_evidence(tmp_path):
     assert not ok and store.items == {}
 
 
+def test_unmatched_search_lines_get_no_evidence_id():
+    store = EvidenceStore()
+    out = store.annotate_search(
+        "- [techcrunch_ai] Meta model | https://ex.com/m | 2026-10-12 | unmatched: recent item, does not contain the query terms\n"
+        "- [hn] Real hit | https://ex.com/real | 2026-10-12")
+    assert store.items.keys() == {"ev_001"}
+    assert "ev_" not in out.splitlines()[0] and out.splitlines()[1].startswith("- ev_001 [hn]")
+
+
 def test_canonical_url():
     assert canonical_url("HTTPS://Ex.COM:443/Path?utm_source=x&id=7#frag") == "https://ex.com/Path?id=7"
     assert canonical_url("http://ex.com:8080/a") == "http://ex.com:8080/a"

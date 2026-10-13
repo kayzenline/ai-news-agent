@@ -54,18 +54,30 @@ def _split(s: str) -> list[str]:
 def index(request: Request):
     with SessionLocal() as s:
         users = s.query(User).order_by(User.id).all()
-    return templates.TemplateResponse(request, "index.html", {"users": users, "provider": config.LLM_PROVIDER})
+    return templates.TemplateResponse(request, "index.html", {
+        "users": users,
+        "provider": config.LLM_PROVIDER,
+        "error": request.query_params.get("error"),
+        "error_email": request.query_params.get("email", ""),
+    })
 
 
 @app.post("/users")
 def create_user(name: str = Form(...), email: str = Form(...)):
+    name, email = name.strip(), email.strip()
+    if not name or not email:
+        raise HTTPException(422, "name and email are required")
     with SessionLocal() as s:
         u = s.query(User).filter_by(email=email).first()
-        if not u:
-            u = User(name=name, email=email, topics=["大模型", "AI Agent"], keywords=["LLM", "agent"])
-            s.add(u)
-            s.commit()
-            scheduler.schedule_user(u)
+        if u:
+            if u.name != name:
+                from urllib.parse import quote
+                return RedirectResponse(f"/?error=name_mismatch&email={quote(email)}", status_code=303)
+            return RedirectResponse(f"/users/{u.id}", status_code=303)
+        u = User(name=name, email=email, topics=["大模型", "AI Agent"], keywords=["LLM", "agent"])
+        s.add(u)
+        s.commit()
+        scheduler.schedule_user(u)
         return RedirectResponse(f"/users/{u.id}", status_code=303)
 
 
@@ -78,6 +90,7 @@ def user_page(request: Request, uid: int):
     job = scheduler.scheduler.get_job(f"user_{uid}")
     requested_run = request.query_params.get("run", "")
     return templates.TemplateResponse(request, "user.html", {"u": u, "briefs": briefs, "runs": runs,
+                                      "max_steps": config.MAX_STEPS,
                                       "next_run": job.next_run_time if job else None, "msg": request.query_params.get("msg"),
                                       "requested_run": requested_run if any(r.run_id == requested_run for r in runs) else ""})
 
@@ -101,10 +114,8 @@ def user_activity(uid: int):
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
-@app.post("/users/{uid}/prefs")
-def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords: str = Form(""),
-               language: str = Form("zh"), send_time: str = Form("08:00"), email_enabled: str = Form(None),
-               timezone: str = Form("")):
+def _update_user_prefs(u: User, name: str | None, topics: str, keywords: str, language: str,
+                       send_time: str, email_enabled: bool, timezone: str):
     if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", send_time or ""):
         raise HTTPException(422, "send_time must be HH:MM (00:00-23:59)")
     timezone = timezone.strip() or config.DEFAULT_TIMEZONE
@@ -112,17 +123,44 @@ def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords
         ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError):
         raise HTTPException(422, "timezone must be an IANA name such as Australia/Sydney")
+    if name is not None:
+        u.name = name.strip() or u.name
+    u.topics, u.keywords, u.language = _split(topics), _split(keywords), language
+    u.send_time, u.email_enabled, u.timezone = send_time, 1 if email_enabled else 0, timezone
+
+
+@app.post("/users/{uid}/prefs")
+def save_prefs(uid: int, name: str = Form(...), topics: str = Form(""), keywords: str = Form(""),
+               language: str = Form("zh"), send_time: str = Form("08:00"), email_enabled: str = Form(None),
+               timezone: str = Form("")):
     with SessionLocal() as s:
         u = s.get(User, uid) or _404()
-        u.name, u.topics, u.keywords, u.language = name, _split(topics), _split(keywords), language
-        u.send_time, u.email_enabled, u.timezone = send_time, 1 if email_enabled else 0, timezone
+        _update_user_prefs(u, name, topics, keywords, language, send_time, bool(email_enabled), timezone)
         s.commit()
         scheduler.schedule_user(u)
     return RedirectResponse(f"/users/{uid}?msg=saved", status_code=303)
 
 
 @app.post("/users/{uid}/run")
-def run_now(request: Request, uid: int):
+async def run_now(request: Request, uid: int):
+    content_type = request.headers.get("content-type", "")
+    if "form" in content_type:
+        form = await request.form()
+        if "topics" in form or "keywords" in form:
+            with SessionLocal() as s:
+                u = s.get(User, uid) or _404()
+                _update_user_prefs(
+                    u,
+                    name=form.get("name"),
+                    topics=form.get("topics", ""),
+                    keywords=form.get("keywords", ""),
+                    language=form.get("language", u.language or "zh"),
+                    send_time=form.get("send_time", u.send_time or "08:00"),
+                    email_enabled=bool(form.get("email_enabled")),
+                    timezone=form.get("timezone", u.timezone or "")
+                )
+                s.commit()
+                scheduler.schedule_user(u)
     try:
         run = submit_run(uid, trigger="manual")
     except LookupError:

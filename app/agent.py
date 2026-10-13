@@ -26,6 +26,7 @@ Rules:
 Guidelines (you decide the order and number of tool calls):
 - Read profile.json first to learn the user's topics/keywords/language.
 - Use web_search with focused queries derived from the topics; fetch_url only for the few stories you need details on.
+- Built-in sources only cover AI and technology (Hacker News, arXiv, TechCrunch, VentureBeat, MIT Technology Review, Hugging Face). If the hits are empty or marked unmatched, write an empty draft and stop. Do not keep rephrasing the same search, and do not cite unmatched lines.
 - Check previous briefs with search_content (URL or distinctive title word in briefs/).
 - If a tool returns ERROR or the draft fails validation, fix it instead of repeating the same call.
 - Be economical: typically 4-10 tool calls total. Today is {today}."""
@@ -136,10 +137,13 @@ class Agent:
             if fail_rounds == FAIL_ROUNDS_WARN:
                 messages.append({"role": "user", "content": "Your last tool calls all failed. Stop retrying the same "
                                  "targets: write the draft now with the evidence you already have (an empty items list is fine)."})
-            if step == self.max_steps - 1:
+            warn_step = self.max_steps - 2 if self.max_steps > 2 else self.max_steps - 1
+            if step == warn_step:
                 messages.append({"role": "user", "content": "Step budget almost exhausted: write the brief now with what you have and finish."})
         res.stopped_reason = "max_steps"
         res.final_text = "stopped: max steps reached"
+        if validator is not None:
+            res.validation_errors = validator(res)
         return res
 
 

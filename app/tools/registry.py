@@ -62,7 +62,10 @@ class ToolRegistry:
         if name not in self.impl:
             return False, f"ERROR: unknown tool {name}. Available: {list(self.impl)}"
         try:
-            args = json.loads(raw_args or "{}")
+            if isinstance(raw_args, dict):
+                args = raw_args
+            else:
+                args = json.loads(raw_args or "{}")
             if not isinstance(args, dict):
                 raise ValueError("arguments must be a JSON object")
         except (json.JSONDecodeError, ValueError) as e:

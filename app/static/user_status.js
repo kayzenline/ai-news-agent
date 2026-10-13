@@ -44,8 +44,14 @@
       succeeded: "✅ 简报生成成功。", no_news: "ℹ️ 本次运行结束，没有新增内容。",
       failed: "❌ 本次运行失败。", interrupted: "⚠️ 本次运行已中断。"};
     notice.className = run.status;
-    notice.textContent = messages[run.status] || `当前状态：${run.status}`;
-    if (run.error) notice.append(document.createTextNode(` 原因：${run.error}`));
+    if (run.status === "succeeded" && run.error === "max_steps") {
+      notice.textContent = "⚠️ 简报已生成（达到最大步数上限 max_steps，已输出阶段草稿）。";
+    } else if (run.status === "no_news" && run.error === "max_steps") {
+      notice.textContent = "ℹ️ 本次运行结束，没有新增内容（达到最大步数上限 max_steps）。";
+    } else {
+      notice.textContent = messages[run.status] || `当前状态：${run.status}`;
+      if (run.error) notice.append(document.createTextNode(` 原因：${run.error}`));
+    }
     if (run.brief_id) {
       notice.append(document.createTextNode(" "), briefLink(run.brief_id,
         run.status === "failed" ? "查看运行记录与 trace" : "查看简报"));
@@ -150,8 +156,12 @@
     revision += 1;
     button.disabled = true;
     noticeKey = "";
-    notice.textContent = "⏳ 正在提交生成请求…";
+    notice.textContent = "⏳ 正在保存偏好并提交生成请求…";
     try {
+      const prefsForm = document.getElementById("prefs-form") || document.querySelector('form[action$="/prefs"]');
+      if (prefsForm) {
+        await fetch(prefsForm.action, {method: "POST", body: new FormData(prefsForm)});
+      }
       const run = await request(form.action, {method: "POST", headers: {Accept: "application/json"}});
       hasActiveRun = active(run);
       showRun(run);

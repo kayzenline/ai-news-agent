@@ -4,7 +4,7 @@
 <p id="run-connection" role="status" aria-live="polite" hidden></p>
 <noscript><p>启用 JavaScript 后可自动查看运行结果；当前需手动刷新页面。</p></noscript>
 <div class="card"><h3>订阅偏好 · {{u.email}}</h3>
-<form method="post" action="/users/{{u.id}}/prefs">
+<form id="prefs-form" method="post" action="/users/{{u.id}}/prefs">
 <label>昵称 <input name="name" value="{{u.name}}"></label>
 <label>话题（逗号分隔）<input name="topics" size="60" value="{{u.topics|join(', ')}}"></label>
 <label>关键词（逗号分隔）<input name="keywords" size="60" value="{{u.keywords|join(', ')}}"></label>
@@ -14,7 +14,7 @@
 <label>时区（IANA）<input name="timezone" value="{{u.timezone}}" placeholder="Australia/Sydney"></label>
 <label><input type="checkbox" name="email_enabled" {% if u.email_enabled %}checked{% endif %}> 邮件推送（需配置 SMTP）</label>
 <button>保存</button></form>
-<p>下次定时运行：{{next_run or "未调度"}}（生成需要时间，邮件会晚于开始时间）</p>
+<p>下次定时运行：{{next_run or "未调度"}}（生成需要时间，邮件会晚于开始时间）· 调研步数上限：{{max_steps or 15}} 步</p>
 <form id="generate-form" method="post" action="/users/{{u.id}}/run"><button>▶ 立即生成今日简报</button></form></div>
 <h3>最近运行</h3><table><thead><tr><th>run</th><th>触发</th><th>状态</th><th>原因</th><th>受理时间</th></tr></thead><tbody id="runs-body">
 {% for r in runs %}<tr data-run-id="{{r.run_id}}" data-status="{{r.status}}"><td>{{r.run_id}}</td><td>{{r.trigger}}</td><td class="{{r.status}}">{{r.status}}</td><td>{{r.error}}</td><td>{{r.created_at.strftime('%m-%d %H:%M:%S')}}</td></tr>

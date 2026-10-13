@@ -93,7 +93,7 @@ class EvidenceStore:
         lines = []
         for line in out.splitlines():
             m = re.match(r"^- \[([^\]]+)\] (.*)$", line)
-            if not m:
+            if not m or "unmatched:" in line:
                 lines.append(line)
                 continue
             parts = [x.strip() for x in m.group(2).split(" | ")]

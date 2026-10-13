@@ -243,6 +243,48 @@ def test_rss_filters_and_ranks_by_query(monkeypatch):
     assert "ex.com/zh" in N.web_search("模型推理", sources=["rss"], days=3650)  # 中文二元组
 
 
+def test_generic_tokens_do_not_make_unrelated_rss_a_hit(monkeypatch):
+    import httpx
+    from app.tools import news_tools as N
+    xml = """<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>
+<item><title>Here are the top AI agents of 2026</title><link>https://ex.com/top</link><description>a 2026 roundup</description></item>
+<item><title>Hong Kong talent scheme opens applications</title><link>https://ex.com/hk</link><description>immigration policy</description></item>
+</channel></rss>"""
+    monkeypatch.setattr(N, "RSS_FEEDS", {"feed": "https://feed.example/rss"})
+    monkeypatch.setattr(N.httpx, "get", lambda *a, **k: httpx.Response(
+        200, content=xml.encode(), request=httpx.Request("GET", a[0])))
+    out = N.web_search("Hong Kong talent scheme Top Talent Pass immigration policy 2026", sources=["rss"], days=3650)
+    assert "ex.com/hk" in out and "ex.com/top" not in out
+    patterns = " ".join(p.pattern for p in N.query_terms("policy 2026 top talent")[0])
+    assert "policy" in patterns and "talent" in patterns
+    assert "2026" not in patterns and "top" not in patterns
+
+
+def test_arxiv_drops_entries_that_lack_query_terms(monkeypatch):
+    import httpx
+    from app.tools import news_tools as N
+    atom = """<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>Hong Kong talent mobility</title><link href="https://arxiv.org/abs/hk"/><published>2026-10-12T00:00:00Z</published><summary>immigration scheme</summary></entry>
+<entry><title>Can language models play a game</title><link href="https://arxiv.org/abs/wiki"/><published>2026-10-12T00:00:00Z</published><summary>retrieval benchmark</summary></entry>
+</feed>"""
+    monkeypatch.setattr(N.httpx, "get", lambda url, **k: httpx.Response(200, text=atom, request=httpx.Request("GET", url)))
+    urls = [item["url"] for item in N._arxiv("Hong Kong talent scheme", 3650)]
+    assert urls == ["https://arxiv.org/abs/hk"]
+    assert len(N._arxiv("2026 top", 3650)) == 2
+
+
+def test_rss_http_error_is_only_the_status(monkeypatch):
+    import httpx
+    from app.tools import news_tools as N
+    monkeypatch.setattr(N, "RSS_FEEDS", {"feed": "https://feed.example/rss"})
+    monkeypatch.setattr(N.httpx, "get", lambda url, **k: httpx.Response(
+        429, text="secret body https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429",
+        request=httpx.Request("GET", url)))
+    out = N.web_search("ai", sources=["rss"], days=2)
+    assert "rss/feed: HTTP 429" in out and "secret" not in out and "mozilla" not in out
+    assert N._rss("ai", 2, errors=None, notes=None) == []
+
+
 def test_rss_no_match_is_reported_not_silent(monkeypatch):
     N = _rss_mock(monkeypatch)
     out = N.web_search("quantum chemistry", sources=["rss"], days=3650)

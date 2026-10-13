@@ -1,5 +1,11 @@
 {% extends "base.html" %}{% block body %}
 <div class="card"><h3>填写身份 / 登录</h3>
+{% if error == "name_mismatch" %}
+<div style="border-left: 4px solid #ef4444; background-color: #fef2f2; color: #b91c1c; padding: 10px 14px; margin-bottom: 12px; border-radius: 4px;">
+  <b>❌ 登录失败：</b>
+  邮箱 <code>{{error_email}}</code> 已被注册，输入的昵称与已绑定的昵称不符。请核对昵称，或使用其他邮箱。
+</div>
+{% endif %}
 <form method="post" action="/users"><label>昵称 <input name="name" required></label>
 <label>邮箱 <input name="email" type="email" required></label><button>进入</button></form></div>
 <h3>已有用户</h3><ul>{% for u in users %}<li><a href="/users/{{u.id}}">{{u.name}}</a> ({{u.email}})</li>{% else %}<li>暂无</li>{% endfor %}</ul>

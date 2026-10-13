@@ -523,3 +523,137 @@ def test_concurrent_deliver_claims_atomically(tmp_path, monkeypatch):
     with SessionLocal() as s:
         res_d = s.get(Delivery, did)
         assert res_d.status == "sent" and res_d.attempts == 1
+
+
+def test_run_with_form_data_auto_saves_preferences(tmp_path, monkeypatch):
+    """When /users/{uid}/run is submitted with form data, preferences are automatically updated first."""
+    from fastapi.testclient import TestClient
+    from app import config, main, service, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "LLM_PROVIDER", "fake")
+    db.init_db()
+    with db.SessionLocal() as s:
+        u = db.User(name="Eddie", email="eddie@example.com", topics=["金融"], keywords=["股票"])
+        s.add(u); s.commit(); uid = u.id
+
+    with TestClient(main.app) as c:
+        # Submit run with updated topics and keywords form
+        r = c.post(f"/users/{uid}/run", data={"name": "Eddie", "topics": "LLM, AI", "keywords": "数据中心", "language": "zh"}, follow_redirects=False)
+        assert r.status_code == 303
+
+    service.wait_all()
+
+    with db.SessionLocal() as s:
+        updated_u = s.get(db.User, uid)
+        assert updated_u.topics == ["LLM", "AI"]
+        assert updated_u.keywords == ["数据中心"]
+
+
+def test_max_steps_with_valid_draft_publishes_with_warning_annotation(tmp_path, monkeypatch):
+    """If agent reaches max_steps but wrote a valid draft, service publishes it with a warning annotation."""
+    import re
+    from pathlib import Path
+    from app import config
+    from app.llm.providers import FakeProvider
+    from app.llm.base import LLMResponse, ToolCall
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "MAX_STEPS", 2)
+
+    def step2_model(msgs):
+        n = sum(1 for m in msgs if m["role"] == "tool")
+        if n == 0:
+            return LLMResponse("", [ToolCall("s", "web_search", json.dumps({"query": "ai"}))], "tool_use")
+        # Step 2: write draft and do not yield an empty tool_call turn (exhausts max_steps=2)
+        out = re.search(r"draft to (\S+)", msgs[0]["content"]).group(1)
+        return LLMResponse("", [ToolCall("w", "write_file", json.dumps({"path": out, "content": D("ev_001")}))], "tool_use")
+
+    b = service.run_for_user(uid, llm=FakeProvider(step2_model), today="2026-10-11")
+    assert b.status == "ok"
+    assert b.stopped_reason == "max_steps"
+    assert b.steps == 2
+    body = Path(b.path).read_text(encoding="utf-8")
+    assert "运行提示" in body
+    assert "最大步数上限" in body
+    assert "AGENT_MAX_STEPS" in body
+
+
+def test_max_steps_without_valid_draft_still_fails(tmp_path, monkeypatch):
+    """If agent reaches max_steps without writing a valid draft, status remains failed."""
+    from app import config
+    from app.llm.providers import FakeProvider
+    from app.llm.base import LLMResponse, ToolCall
+    service, uid, sent = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "MAX_STEPS", 2)
+
+    def never_write_model(msgs):
+        return LLMResponse("", [ToolCall("s", "web_search", json.dumps({"query": "ai"}))], "tool_use")
+
+    b = service.run_for_user(uid, llm=FakeProvider(never_write_model), today="2026-10-11")
+    assert b.status == "failed"
+    assert b.stopped_reason == "max_steps"
+
+
+def test_fetch_url_extracts_pdf_text(tmp_path, monkeypatch):
+    import io
+    from pypdf import PdfWriter
+    from app.tools import news_tools
+    from app.tools.registry import ToolRegistry
+    from app.tools.sandbox import Sandbox
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    writer.write(buf)
+    pdf_bytes = buf.getvalue()
+
+    # Blank/scanned PDF returns friendly fallback
+    assert "no extractable text" in news_tools._extract_pdf_text(pdf_bytes)
+
+    # PDF fetch returns extracted text
+    monkeypatch.setattr(news_tools, "_get_limited", lambda url, **k: (True, "Deep learning breakthrough details in PDF"))
+    reg = ToolRegistry(Sandbox(tmp_path))
+    ok, out = reg.call("fetch_url", {"url": "https://example.com/paper.pdf"})
+    assert ok
+    assert "Deep learning breakthrough" in out
+
+
+def test_blank_name_or_email_is_rejected(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import config, main, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    db.init_db()
+    with TestClient(main.app) as c:
+        assert c.post("/users", data={"name": "   ", "email": "a@x.com"}).status_code == 422
+        assert c.post("/users", data={"name": "A", "email": "  "}).status_code == 422
+
+
+def test_login_with_mismatched_nickname_is_rejected(tmp_path, monkeypatch):
+    """If an email already exists, submitting with a different nickname is rejected with error notice."""
+    from fastapi.testclient import TestClient
+    from app import config, main, db
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    db.init_db()
+    with TestClient(main.app) as c:
+        # Create user Alice
+        r1 = c.post("/users", data={"name": "Alice", "email": "alice@example.com"}, follow_redirects=False)
+        assert r1.status_code == 303
+        uid = int(r1.headers["location"].split("/")[-1])
+
+        # Attempt to login using the same email but different nickname Bob
+        r2 = c.post("/users", data={"name": "Bob", "email": "alice@example.com"}, follow_redirects=False)
+        assert r2.status_code == 303
+        assert "error=name_mismatch" in r2.headers["location"]
+
+        # Ensure index page renders the error message
+        page = c.get(r2.headers["location"])
+        assert "输入的昵称与已绑定的昵称不符" in page.text
+
+        # Verify DB still has Alice and was not modified
+        with db.SessionLocal() as s:
+            u = s.get(db.User, uid)
+            assert u.name == "Alice"
+
+        # Attempt to login using the correct nickname Alice
+        r3 = c.post("/users", data={"name": "Alice", "email": "alice@example.com"}, follow_redirects=False)
+        assert r3.status_code == 303
+        assert r3.headers["location"] == f"/users/{uid}"

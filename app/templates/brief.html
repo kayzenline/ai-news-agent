@@ -1,5 +1,11 @@
 {% extends "base.html" %}{% block body %}
 <p><a href="/users/{{b.user_id}}">← 返回</a> · {{b.date}} · <span class="{{b.status}}">{{b.status}}</span> · {{b.stopped_reason}} · {{b.steps}} 步</p>
+{% if b.stopped_reason == "max_steps" %}
+<div class="card" style="border-left: 4px solid #f59e0b; background-color: #fffbeb; color: #92400e; padding: 12px; margin-bottom: 12px;">
+  <b>⚠️ 步数上限截断提示：</b>
+  本次运行已达到最大步数上限（{{b.steps}} 步），系统已校验并直接发布当前阶段性草稿。若需更充分的主题调研与深度挖掘，可在 <code>.env</code> 中调大 <code>AGENT_MAX_STEPS</code> 并重新生成。
+</div>
+{% endif %}
 <div class="card">{{html|safe}}</div>
 <h3>投递</h3>{% for d in deliveries %}<p>{{d.channel}} → {{d.recipient}} · <span class="{{d.status}}">{{d.status}}</span> · 尝试 {{d.attempts}} 次 {% if d.last_error %}· {{d.last_error}}{% endif %}
 {% if d.status in ("failed", "unknown", "pending") %}<form method="post" action="/deliveries/{{d.id}}/retry" style="display:inline"><button>重发原简报</button></form>{% endif %}</p>

@@ -69,18 +69,34 @@ def _arxiv_get(params: dict):
 def _arxiv(query: str, days: int) -> list[dict]:
     r = _arxiv_get({"search_query": f"all:{query}", "sortBy": "submittedDate", "sortOrder": "descending", "max_results": 5})
     feed = feedparser.parse(r.text)
-    return [{"source": "arxiv", "title": " ".join(e.title.split()), "url": e.link, "date": _fmt(_entry_dt(e)),
-             "summary": " ".join(e.get("summary", "").split())[:300]}
-            for e in feed.entries if _recent(_entry_dt(e), days)]
+    pats, cjk = query_terms(query)
+    out = []
+    for e in feed.entries:
+        if not _recent(_entry_dt(e), days):
+            continue
+        title = " ".join((e.title or "").split())
+        summary = " ".join(e.get("summary", "").split())
+        if (pats or cjk) and _score(title, summary, pats, cjk) <= 0:
+            continue
+        out.append({"source": "arxiv", "title": title, "url": e.link, "date": _fmt(_entry_dt(e)),
+                    "summary": summary[:300]})
+    return out
 
 
-STOPWORDS = {"the", "and", "for", "with", "news", "latest", "of", "in", "on", "to", "a", "an"}
+STOPWORDS = {
+    "the", "and", "for", "with", "news", "latest", "of", "in", "on", "to", "a", "an",
+    "top", "new", "first", "best", "how", "what", "why", "your", "from", "that", "this",
+    "are", "you", "our", "its", "into", "over", "after", "about", "more", "most", "will",
+    "just", "than", "then", "also", "been", "have", "has", "was", "were", "not", "but",
+    "can", "all", "who", "their", "they", "said", "says", "update", "updates", "here",
+}
 CJK_RE = re.compile(r"[\u3400-\u9fff]+")
 
 
 def query_terms(query: str) -> tuple[list[re.Pattern], list[str]]:
     """英文词按词边界匹配（避免 "ai" 命中 "said"）；中文连续串用本身及二元组做子串匹配。"""
-    ascii_terms = [w for w in re.findall(r"[a-z0-9][a-z0-9+.\-]*", query.lower()) if w not in STOPWORDS]
+    ascii_terms = [w for w in re.findall(r"[a-z0-9][a-z0-9+.\-]*", query.lower())
+                   if w not in STOPWORDS and not w.isdigit()]
     pats = [re.compile(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])") for w in ascii_terms]
     cjk = []
     for run in CJK_RE.findall(query):
@@ -109,9 +125,13 @@ def _rss(query: str, days: int, errors: list | None = None, notes: list | None =
             r = httpx.get(url, timeout=TIMEOUT, headers=UA, follow_redirects=True)
             r.raise_for_status()
             feed = feedparser.parse(r.content)
+        except httpx.HTTPStatusError as e:
+            if errors is not None:
+                errors.append(f"rss/{name}: HTTP {e.response.status_code}")
+            continue
         except Exception as e:  # 单个 feed 失败不再静默：记录到 errors 回传给模型
             if errors is not None:
-                errors.append(f"rss/{name}: {type(e).__name__}: {e}")
+                errors.append(f"rss/{name}: {type(e).__name__}: {e}".splitlines()[0][:200])
             continue
         for e in feed.entries[:30]:
             dt = _entry_dt(e)
@@ -258,11 +278,34 @@ def _decode_body(raw: bytes, encoding: str) -> bytes:
     return raw[:MAX_FETCH_BYTES]
 
 
-def _get_limited(url: str) -> str:
-    """不自动跟随重定向：每一跳都重新做公网校验；流式读取并限制压缩前/解压后字节数。
+def _extract_pdf_text(raw: bytes, max_chars: int = 4000) -> str:
+    """从二进制 PDF 字节流中提取文本，限制解析前 10 页，防止超大文档或恶意构造挂起。"""
+    try:
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(raw))
+        pages_text = []
+        chars_collected = 0
+        for page in reader.pages[:10]:
+            t = page.extract_text() or ""
+            t = t.strip()
+            if t:
+                pages_text.append(t)
+                chars_collected += len(t)
+                if chars_collected >= max_chars:
+                    break
+        combined = "\n\n".join(pages_text)
+        cleaned = re.sub(r"[ \t]+", " ", combined).strip()
+        if not cleaned:
+            return "PDF document contains no extractable text (e.g. scanned images without OCR layer)."
+        return cleaned[:max_chars]
+    except Exception as e:
+        return f"ERROR: failed to extract text from PDF: {e}"
 
-    只声明 gzip/deflate，避免依赖 br/zstd 解码器；读原始字节后自行解压一次并返回文本。
-    旧实现把已解压的字节配原响应头重建 Response，会按 Content-Encoding 再解压一次，导致 "incorrect header check"。
+
+def _get_limited(url: str, max_chars: int = 4000) -> tuple[bool, str]:
+    """不自动跟随重定向：每一跳都重新做公网校验；流式读取并限制压缩前/解压后字节数。
+    返回 (is_pdf, text)。
     """
     for _ in range(MAX_REDIRECTS + 1):
         check_public_url(url)
@@ -271,18 +314,25 @@ def _get_limited(url: str) -> str:
                 url = urljoin(url, r.headers.get("location", ""))
                 continue
             r.raise_for_status()
+            ctype = r.headers.get("content-type", "").lower()
+            is_pdf = urlsplit(url).path.lower().endswith(".pdf") or "application/pdf" in ctype
             raw = bytearray()
             for chunk in r.iter_raw():  # 原始（可能压缩的）字节，同样受上限约束
                 raw += chunk
                 if len(raw) > MAX_FETCH_BYTES:
                     break
             body = _decode_body(bytes(raw), r.headers.get("content-encoding", ""))
-            return body.decode(r.charset_encoding or "utf-8", errors="replace")
+            if is_pdf:
+                return True, _extract_pdf_text(body, max_chars=max_chars)
+            return False, body.decode(r.charset_encoding or "utf-8", errors="replace")
     raise ValueError(f"too many redirects (>{MAX_REDIRECTS})")
 
 
 def fetch_url(url: str, max_chars: int = 4000) -> str:
-    text = re.sub(r"(?is)<(script|style|nav|footer|header).*?</\1>", " ", _get_limited(url))
+    is_pdf, text = _get_limited(url, max_chars=max_chars)
+    if is_pdf:
+        return text[:max_chars]
+    text = re.sub(r"(?is)<(script|style|nav|footer|header).*?</\1>", " ", text)
     text = html.unescape(re.sub(r"<[^>]+>", " ", text))
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_chars]

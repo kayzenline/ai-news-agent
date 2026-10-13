@@ -79,7 +79,7 @@ def _execute(run_pk: int, llm=None, today=None):
         b = run_for_user(user_id, llm=llm, today=today, run_id=run_id)
         status = {"ok": "succeeded", "no_news": "no_news"}.get(b.status, "failed")
         _set(run_pk, status=status, brief_id=b.id, finished_at=datetime.now(),
-             error="" if status != "failed" else b.stopped_reason)
+             error="" if status != "failed" and b.stopped_reason != "max_steps" else b.stopped_reason)
     except Exception as e:  # 初始化/锁/DB 等任何异常都落到 run 终态，不只写日志
         log.exception("run %s failed", run_id)
         _set(run_pk, status="failed", error=f"{type(e).__name__}: {e}"[:500], finished_at=datetime.now())
@@ -149,8 +149,10 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
 
             res = agent.run(f"Please prepare today's AI news brief for user {user.name}.", today=today, output=rel,
                             validator=validator)
-            ok = (res.stopped_reason == "model_finished" and checked.get("draft") is not None
-                  and _wrote_this_run(res.trace, rel, draft, started))
+            draft_valid = (checked.get("draft") is not None
+                           and _wrote_this_run(res.trace, rel, draft, started)
+                           and not getattr(res, "validation_errors", None))
+            ok = res.stopped_reason in ("model_finished", "max_steps") and draft_valid
             path = sb.root / "runs" / today / f"{run_id}.md"
             status = "failed"
             if ok:
@@ -159,7 +161,8 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
                 if items:
                     # Service 渲染正文：链接只来自证据库，模型文本转义
                     md = sb.root / staging / "brief.md"
-                    md.write_text(render_markdown(d, store, user.name, today, user.language), encoding="utf-8")
+                    md.write_text(render_markdown(d, store, user.name, today, user.language,
+                                                  stopped_reason=res.stopped_reason, steps=res.steps), encoding="utf-8")
                     path = publish(sb, md, today, run_id)
                     for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
                                          (".evidence.json", store.to_json())):
@@ -172,7 +175,8 @@ def run_for_user(user_id: int, llm=None, today: str | None = None, run_id: str |
                         res.stopped_reason = "insufficient_search"
                     else:
                         md = sb.root / staging / "brief.md"
-                        md.write_text(render_markdown(d, store, user.name, today, user.language), encoding="utf-8")
+                        md.write_text(render_markdown(d, store, user.name, today, user.language,
+                                                      stopped_reason=res.stopped_reason, steps=res.steps), encoding="utf-8")
                         path = publish(sb, md, today, run_id)
                         for suffix, body in ((".draft.json", json.dumps(d, ensure_ascii=False, indent=2)),
                                              (".evidence.json", store.to_json())):
